@@ -2,14 +2,14 @@
 setlocal
 title ApexCare Engine (Beast Edition)
 
-:: Check for Administrator privileges
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [*] Elevating privileges to Administrator...
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"%~dp0ApexCare.ps1\"' -Verb RunAs"
-    exit /b
+:: ApexCare.ps1 requests Administrator through a visible UAC prompt.
+set "SCRIPT=%~dp0ApexCare.ps1"
+if not exist "%SCRIPT%" (
+    echo [X] ApexCare.ps1 was not found beside this launcher.
+    echo     Expected: "%SCRIPT%"
+    pause
+    exit /b 1
 )
-
-:: Already elevated, run ApexCare
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0ApexCare.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
+if errorlevel 1 pause
 endlocal

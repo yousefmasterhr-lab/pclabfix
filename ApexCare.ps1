@@ -27,7 +27,11 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
 
-# Storage Directory for logs & state persistence
+# Safe mode is intentionally read-only. Maintenance actions that change system
+# settings, install software, delete files, or restart Windows are not exposed.
+$Global:SafeMode = $true
+
+# Storage Directory for diagnostic reports
 $Global:AppDir = "$env:ProgramData\ApexCare"
 $Global:LocalScript = Join-Path $Global:AppDir "ApexCare.ps1"
 $Global:StateFile = Join-Path $Global:AppDir "state.json"
@@ -51,25 +55,15 @@ function Ensure-AppDirectory {
 Ensure-AppDirectory
 
 function Sync-LocalScript {
-    Ensure-AppDirectory
-    try {
-        $raw = ""
-        try {
-            $raw = (Invoke-RestMethod -Uri $Global:ShortUrl -UseBasicParsing)
-        } catch {
-            $raw = (Invoke-RestMethod -Uri $Global:RawUrl -UseBasicParsing)
-        }
-        if ($raw -and $raw.Length -gt 100) {
-            [System.IO.File]::WriteAllText($Global:LocalScript, $raw, [System.Text.Encoding]::UTF8)
-        }
-    } catch {}
+    Write-Critical "In-memory execution is disabled in Safe Mode. Run the reviewed local .ps1 file."
+    return $false
 }
 
 # Resolve execution path (in-memory pipeline vs local file)
 $Global:ScriptRuntimePath = $PSCommandPath
 if ([string]::IsNullOrWhiteSpace($Global:ScriptRuntimePath)) {
-    $Global:ScriptRuntimePath = $Global:LocalScript
-    Sync-LocalScript
+    Write-Critical "This script must be run from a local, reviewed file."
+    exit 1
 } else {
     try {
         Copy-Item -Path $Global:ScriptRuntimePath -Destination $Global:LocalScript -Force -ErrorAction SilentlyContinue
@@ -78,38 +72,20 @@ if ([string]::IsNullOrWhiteSpace($Global:ScriptRuntimePath)) {
 
 function Assert-Administrator {
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-Host ""
-        Write-Host " [*] Elevating privileges to Administrator..." -ForegroundColor Yellow
-        
-        # Ensure script exists locally if executed in-memory
-        if ([string]::IsNullOrWhiteSpace($Global:ScriptRuntimePath) -or (-not (Test-Path $Global:ScriptRuntimePath))) {
-            $Global:ScriptRuntimePath = $Global:LocalScript
-            Sync-LocalScript
-        }
-
-        if (-not (Test-Path $Global:ScriptRuntimePath)) {
-            Write-Host " [X] Could not resolve script location for elevation." -ForegroundColor Red
-            Read-Host " Press Enter to exit..."
-            exit 1
-        }
-
-        $elevatedArgs = @(
-            "-NoExit",
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", "`"$Global:ScriptRuntimePath`""
-        ) -join " "
-
-        try {
-            Start-Process -FilePath "powershell.exe" -ArgumentList $elevatedArgs -Verb RunAs
-        } catch {
-            Write-Host " [X] Administrator privileges were denied or elevation failed: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "     Please right-click PowerShell and choose 'Run as administrator', then re-run the script." -ForegroundColor Yellow
-            Read-Host " Press Enter to exit..."
-        }
-        exit 0
+    if ($currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Notice "Running with Administrator privileges. Safe Mode remains read-only."
+        return
     }
+
+    Write-Notice "Administrator privileges are required for this session. Windows will show a UAC confirmation."
+    $elevatedArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$Global:ScriptRuntimePath`" -Elevated"
+    try {
+        Start-Process -FilePath "powershell.exe" -ArgumentList $elevatedArgs -Verb RunAs -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Critical "Administrator elevation was cancelled or failed: $($_.Exception.Message)"
+        exit 1
+    }
+    exit 0
 }
 Assert-Administrator
 
@@ -158,39 +134,67 @@ function Set-AutomationState {
         [string]$CurrentPhase,
         [int]$StepIndex
     )
-    $state = [PSCustomObject]@{
-        IsRunning     = $true
-        CurrentPhase  = $CurrentPhase
-        StepIndex     = $StepIndex
-        ScriptPath    = $Global:ScriptRuntimePath
-        Timestamp     = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    }
-    $state | ConvertTo-Json | Set-Content -Path $Global:StateFile -Force
-
-    # Register RunOnce in Registry
-    Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "ApexCareResume" -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$Global:ScriptRuntimePath`" -Resume" -Force
+    Write-Notice "Reboot persistence is disabled in Safe Mode."
 }
 
 function Clear-AutomationState {
-    if (Test-Path $Global:StateFile) { Remove-Item -Path $Global:StateFile -Force }
-    Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "ApexCareResume" -ErrorAction SilentlyContinue
+    return
 }
 
 function Get-AutomationState {
-    if (Test-Path $Global:StateFile) {
-        try {
-            return Get-Content -Path $Global:StateFile -Raw | ConvertFrom-Json
-        } catch {
-            return $null
-        }
-    }
     return $null
+}
+
+function Block-UnsafeOperation {
+    param([string]$Name)
+    Write-Critical "$Name is disabled in Safe Mode because it changes Windows, installs software, deletes data, or restarts the computer."
+    return $false
+}
+
+function Invoke-RpcPrinterCompatibility {
+    Write-Step "Preparing optional RPC printer compatibility settings..."
+    Write-Notice "This is an explicit system change and is not part of Safe Mode diagnostics."
+    Write-Notice "RpcUseNamedPipeProtocol=1 requests the named-pipe protocol; this matches the supplied values."
+    Write-Host ""
+    Write-Host "The following machine-wide DWORD values will be created or replaced:" -ForegroundColor Yellow
+    Write-Host "  HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\RPC" -ForegroundColor Cyan
+    Write-Host "    RpcUseNamedPipeProtocol = 1"
+    Write-Host "    RpcProtocols            = 7"
+    Write-Host "    ForceKerberosForRpc     = 1"
+    Write-Host "  HKLM:\System\CurrentControlSet\Control\Print" -ForegroundColor Cyan
+    Write-Host "    RpcAuthnLevelPrivacyEnabled = 0"
+    Write-Host ""
+
+    $confirmation = Read-Host "Type APPLY-RPC-SETTINGS to continue"
+    if ($confirmation -cne "APPLY-RPC-SETTINGS") {
+        Write-Notice "RPC settings were not changed."
+        return
+    }
+
+    try {
+        $rpcPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers\RPC"
+        $printPath = "HKLM:\System\CurrentControlSet\Control\Print"
+
+        New-Item -Path $rpcPolicyPath -Force -ErrorAction Stop | Out-Null
+        New-Item -Path $printPath -Force -ErrorAction Stop | Out-Null
+
+        New-ItemProperty -Path $rpcPolicyPath -Name "RpcUseNamedPipeProtocol" -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $rpcPolicyPath -Name "RpcProtocols" -PropertyType DWord -Value 7 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $rpcPolicyPath -Name "ForceKerberosForRpc" -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $printPath -Name "RpcAuthnLevelPrivacyEnabled" -PropertyType DWord -Value 0 -Force -ErrorAction Stop | Out-Null
+
+        Write-Success "RPC printer settings were applied successfully."
+        Write-Notice "Restart Windows manually for the settings to take effect. ApexCare will not restart it automatically."
+    } catch {
+        Write-Critical "RPC settings could not be applied: $($_.Exception.Message)"
+    }
 }
 
 # ==============================================================================
 # MODULE 0: ZERO-TOUCH BOOTSTRAPPER
 # ==============================================================================
 function Install-Prerequisites {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Dependency installation") }
     Write-Step "Bootstrapping core package management and update modules..."
     
     # Verify/Provision Winget
@@ -481,6 +485,7 @@ function Show-OEMOfficialLink {
 # MODULE 2: NETWORK STACK TURBOCHARGING (ZERO LATENCY & UNTHROTTLED THROUGHPUT)
 # ==============================================================================
 function Invoke-NetworkOptimization {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Network tuning") }
     Write-Step "Executing zero-latency network stack and throughput tuning..."
 
     try {
@@ -520,6 +525,7 @@ function Invoke-NetworkOptimization {
 # MODULE 3: CPU & OS KERNEL PEAK OPTIMIZATION
 # ==============================================================================
 function Invoke-PeakPerformance {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Power and kernel tuning") }
     Write-Step "Unleashing CPU, Power and Kernel peak responsiveness..."
 
     try {
@@ -569,6 +575,7 @@ function Invoke-PeakPerformance {
 # MODULE 4: GPU BEAST MODE & DISPLAY PIPELINE ACCELERATION
 # ==============================================================================
 function Invoke-GPUBeastMode {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "GPU tuning and vendor installation") }
     Write-Step "Engaging GPU Beast Mode & hardware display pipeline..."
 
     try {
@@ -660,6 +667,7 @@ public class MemoryPurgeHelper {
 }
 
 function Invoke-DeepCleanup {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Cache deletion and storage maintenance") }
     Write-Step "Executing storage recovery, cache purging & NVMe/SSD TRIM..."
 
     # Standby RAM purge first
@@ -691,6 +699,7 @@ function Invoke-DeepCleanup {
 # MODULE 6: SAFE TELEMETRY & DIAGNOSTIC DEBLOAT
 # ==============================================================================
 function Invoke-SafeDebloat {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Service and telemetry disabling") }
     Write-Step "Executing non-breaking telemetry & background diagnostic debloat..."
 
     try {
@@ -722,6 +731,7 @@ function Invoke-SafeDebloat {
 # MODULE 7: WINDOWS CORE FILE & IMAGE SELF-HEALING
 # ==============================================================================
 function Invoke-SystemRepair {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "System repair") }
     Write-Step "Auditing and servicing Windows Component Store & System Files..."
     
     Write-Notice "Executing Deployment Image Servicing and Management (DISM)..."
@@ -736,6 +746,7 @@ function Invoke-SystemRepair {
 # MODULE 8: OEM ECOSYSTEM DEPLOYMENT & DRIVER SERVICING
 # ==============================================================================
 function Invoke-DriverAndOEMUpdates {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Driver installation") }
     Write-Step "Detecting OEM ecosystem and servicing driver repositories..."
     
     $oem = Get-OEMSupportDetails
@@ -772,6 +783,7 @@ function Invoke-DriverAndOEMUpdates {
 # MODULE 9: NATIVE APPLICATION FLEET UPGRADE
 # ==============================================================================
 function Invoke-AppUpdates {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Application updates") }
     Write-Step "Upgrading all installed software from official vendor sources..."
     winget upgrade --all --include-unknown --accept-package-agreements --accept-source-agreements --silent
     Write-Success "Application fleet upgrade routine executed."
@@ -798,6 +810,7 @@ function Invoke-SecurityScan {
 # FULL AUTOPILOT PIPELINE (WITH REBOOT SURVIVAL)
 # ==============================================================================
 function Start-FullAutoPilot {
+    if ($Global:SafeMode) { return (Block-UnsafeOperation "Full autopilot") }
     param([int]$ResumeStep = 1)
 
     $pipeline = @(
@@ -857,55 +870,30 @@ function Start-FullAutoPilot {
 try {
     $activeState = Get-AutomationState
 
-    if (($args -contains "-Resume") -and $activeState) {
-        Show-Header
-        Write-Notice "Detected interrupted routine. Resuming pipeline from Stage $($activeState.StepIndex) ($($activeState.CurrentPhase))..."
-        Start-FullAutoPilot -ResumeStep $activeState.StepIndex
-        exit
-    }
-
     do {
         Show-Header
-        Write-Host " Select an operational module:" -ForegroundColor Yellow
-        Write-Host " +-- FULL AUTOMATION --------------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [1] FULL AUTOPILOT (Diagnostic -> Net -> Kernel -> Clean -> GPU)    |" -ForegroundColor Green
-        Write-Host " +-- SYSTEM AUDIT & OEM -----------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [2] Hardware Diagnostics & Battery Wear Audit                       |"
-        Write-Host " | [3] Get Official OEM Support Tool & Direct Driver Links             |" -ForegroundColor Cyan
-        Write-Host " +-- PERFORMANCE & KERNEL TUNING --------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [4] Network Stack Turbocharging (Zero Latency & Unthrottled)        |"
-        Write-Host " | [5] CPU & OS Kernel Peak Responsiveness (Ultimate Power, Fast Boot) |"
-        Write-Host " | [6] GPU Beast Mode & Display Pipeline (HAGS, VRR, Vendor Suite)     |"
-        Write-Host " +-- SYSTEM HYGIENE & REPAIR ------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [7] Standby RAM Purge, Storage Recovery & NVMe/SSD TRIM             |"
-        Write-Host " | [8] Safe Telemetry & Diagnostic Debloat (Non-Breaking)              |"
-        Write-Host " | [9] Windows Core Image Repair & System Integrity (DISM & SFC)       |"
-        Write-Host " | [10] Update Drivers & OEM Tool Provisioning                         |"
-        Write-Host " | [11] Upgrade All Installed Apps (Winget Fleet Update)               |"
-        Write-Host " | [12] Run Microsoft Defender Quick Scan with Signature Intelligence  |"
+        Write-Host " Safe Mode is read-only. RPC changes are available only as an explicit confirmed action." -ForegroundColor Green
+        Write-Host " +-- SAFE DIAGNOSTICS -------------------------------------------------+" -ForegroundColor DarkCyan
+        Write-Host " | [1] Hardware Diagnostics & Battery Wear Audit                       |"
+        Write-Host " | [2] Show Official OEM Support Links                                 |" -ForegroundColor Cyan
+        Write-Host " | [3] Run Microsoft Defender Quick Scan                               |"
+        Write-Host " +-- EXPLICIT SYSTEM CHANGE -------------------------------------------+" -ForegroundColor DarkYellow
+        Write-Host " | [4] Apply printer RPC compatibility settings (UAC + confirmation)   |" -ForegroundColor Yellow
         Write-Host " +-- EXIT -------------------------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [13] Exit Session                                                   |" -ForegroundColor DarkGray
+        Write-Host " | [5] Exit Session                                                    |" -ForegroundColor DarkGray
         Write-Host " +---------------------------------------------------------------------+" -ForegroundColor DarkCyan
         Write-Host ""
-        $choice = Read-Host " Enter your selection (1-13)"
+        $choice = Read-Host " Enter your selection (1-5)"
 
         switch ($choice) {
-            "1"  { Start-FullAutoPilot -ResumeStep 1 }
-            "2"  { Invoke-HardwareDiagnostics; pause }
-            "3"  { Show-OEMOfficialLink; pause }
-            "4"  { Invoke-NetworkOptimization; pause }
-            "5"  { Invoke-PeakPerformance; pause }
-            "6"  { Invoke-GPUBeastMode; pause }
-            "7"  { Invoke-DeepCleanup; pause }
-            "8"  { Invoke-SafeDebloat; pause }
-            "9"  { Invoke-SystemRepair; pause }
-            "10" { Install-Prerequisites; Invoke-DriverAndOEMUpdates; pause }
-            "11" { Install-Prerequisites; Invoke-AppUpdates; pause }
-            "12" { Invoke-SecurityScan; pause }
-            "13" { Write-Host "Terminating session..."; exit }
-            default { Write-Notice "Invalid selection, please select a valid option (1-13)." }
+            "1" { Invoke-HardwareDiagnostics; pause }
+            "2" { Show-OEMOfficialLink; pause }
+            "3" { Invoke-SecurityScan; pause }
+            "4" { Invoke-RpcPrinterCompatibility; pause }
+            "5" { Write-Host "Terminating session..."; exit }
+            default { Write-Notice "Invalid selection, please select a valid option (1-5)." }
         }
-    } while ($choice -ne "13")
+    } while ($choice -ne "5")
 } catch {
     Write-Host ""
     Write-Host " [X] Unexpected Runtime Error: $($_.Exception.Message)" -ForegroundColor Red
