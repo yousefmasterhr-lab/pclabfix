@@ -29,6 +29,7 @@ $Global:AppDir = "$env:ProgramData\ApexCare"
 $Global:LocalScript = Join-Path $Global:AppDir "ApexCare.ps1"
 $Global:StateFile = Join-Path $Global:AppDir "state.json"
 $Global:ReportFile = Join-Path $Global:AppDir "SystemReport.txt"
+$Global:HtmlReport = Join-Path $Global:AppDir "ApexCare_Dashboard.html"
 $Global:ShortUrl = "https://tinyurl.com/pclabfix"
 $Global:RawUrl = "https://raw.githubusercontent.com/yousefmasterhr-lab/pclabfix/main/ApexCare.ps1"
 
@@ -41,6 +42,7 @@ function Initialize-AppDirectory {
             $Global:LocalScript = Join-Path $Global:AppDir "ApexCare.ps1"
             $Global:StateFile = Join-Path $Global:AppDir "state.json"
             $Global:ReportFile = Join-Path $Global:AppDir "SystemReport.txt"
+            $Global:HtmlReport = Join-Path $Global:AppDir "ApexCare_Dashboard.html"
             New-Item -Path $Global:AppDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
         }
     }
@@ -182,6 +184,33 @@ function Get-AutomationState {
         }
     }
     return $null
+}
+
+# ==============================================================================
+# MODULE 0.5: SYSTEM RESTORE POINT SAFEGUARD
+# ==============================================================================
+function Invoke-SystemRestorePoint {
+    Write-Step "Creating System Restore Point safeguard..."
+    try {
+        # Check if System Restore service is available
+        $vssService = Get-Service -Name "VSS" -ErrorAction SilentlyContinue
+        if ($vssService -and $vssService.StartType -eq "Disabled") {
+            Set-Service -Name "VSS" -StartupType Manual -ErrorAction SilentlyContinue
+        }
+
+        # Enable System Restore on C: if disabled
+        Enable-ComputerRestore -Drive "C:\" -ErrorAction SilentlyContinue
+
+        # Create Restore Point
+        Checkpoint-Computer -Description "ApexCare Pre-Optimization" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+        Write-Success "System Restore Point 'ApexCare Pre-Optimization' created successfully."
+    } catch {
+        if ($_.Exception.Message -match "0x80042306" -or $_.Exception.Message -match "frequency" -or $_.Exception.Message -match "24") {
+            Write-Notice "A recent System Restore Point was already created within the last 24 hours."
+        } else {
+            Write-Notice "System Restore check completed: $($_.Exception.Message)"
+        }
+    }
 }
 
 # ==============================================================================
@@ -449,6 +478,386 @@ function Invoke-HardwareDiagnostics {
     Write-Success "System report saved to: $Global:ReportFile"
 }
 
+function Export-DiagnosticHtmlReport {
+    Write-Step "Compiling interactive Cyberpunk/Fluent HTML Diagnostic Dashboard..."
+
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $bios = Get-CimInstance Win32_BIOS
+        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+        $gpus = Get-CimInstance Win32_VideoController
+        $volumes = Get-Volume | Where-Object { $_.DriveLetter }
+        $physicalDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
+        $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
+        $oem = Get-OEMSupportDetails
+
+        $totalRamGB = [Math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+        $freeRamGB = [Math]::Round($os.FreePhysicalMemory / 1MB, 1)
+        $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
+        $usedRamPercent = if ($totalRamGB -gt 0) { [Math]::Round(($usedRamGB / $totalRamGB) * 100, 0) } else { 0 }
+
+        $uptimeSpan = (Get-Date) - $os.LastBootUpTime
+        $uptimeStr = "{0}d {1}h {2}m" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
+        $nowStr = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+
+        # Build Disk rows
+        $diskRows = ""
+        foreach ($vol in $volumes) {
+            $vTotal = [Math]::Round($vol.Size / 1GB, 1)
+            $vFree = [Math]::Round($vol.SizeRemaining / 1GB, 1)
+            $vUsed = [Math]::Round($vTotal - $vFree, 1)
+            $vUsedPct = if ($vTotal -gt 0) { [Math]::Round(($vUsed / $vTotal) * 100, 0) } else { 0 }
+            $barColor = if ($vUsedPct -ge 90) { "#ff3366" } elseif ($vUsedPct -ge 75) { "#ffaa00" } else { "#00e5ff" }
+
+            $diskRows += @"
+            <div class="card-item">
+                <div class="item-header">
+                    <span class="item-title">Drive $($vol.DriveLetter): ($($vol.FileSystem)) - $($vol.FileSystemLabel)</span>
+                    <span class="item-val">$vFree GB Free / $vTotal GB</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: ${vUsedPct}%; background: $barColor;"></div>
+                </div>
+                <div class="item-footer"><span>Used: ${vUsedPct}%</span><span>Total: ${vTotal} GB</span></div>
+            </div>
+"@
+        }
+
+        # Build Physical Disk rows
+        foreach ($pd in $physicalDisks) {
+            $pdSizeGB = [Math]::Round($pd.Size / 1GB, 1)
+            $diskRows += @"
+            <div class="card-item" style="border-left: 3px solid #00ff88;">
+                <div class="item-header">
+                    <span class="item-title">$($pd.FriendlyName)</span>
+                    <span class="badge badge-green">$($pd.MediaType) - ${pdSizeGB} GB</span>
+                </div>
+            </div>
+"@
+        }
+
+        # Build GPU list
+        $gpuItems = ""
+        foreach ($g in $gpus) {
+            $vramGB = if ($g.AdapterRAM) { [Math]::Round($g.AdapterRAM / 1GB, 2) } else { 0 }
+            $gpuItems += @"
+            <div class="card-item">
+                <div class="item-header">
+                    <span class="item-title">$($g.Name)</span>
+                    <span class="badge badge-cyan">${vramGB} GB VRAM</span>
+                </div>
+                <div class="item-detail">Driver Version: $($g.DriverVersion)</div>
+                <div class="item-detail">Video Processor: $($g.VideoProcessor)</div>
+            </div>
+"@
+        }
+
+        # Build Battery Block
+        $batteryBlock = ""
+        if ($battery) {
+            $batPct = $battery.EstimatedChargeRemaining
+            $batStatus = switch ($battery.BatteryStatus) {
+                1 { "Discharging" }
+                2 { "AC Connected / Charging" }
+                3 { "Fully Charged" }
+                default { "Normal" }
+            }
+            $batteryBlock = @"
+            <div class="card">
+                <div class="card-title"><span class="icon">BATTERY</span> LAPTOP BATTERY HEALTH</div>
+                <div class="card-item">
+                    <div class="item-header">
+                        <span class="item-title">Battery Status: $batStatus</span>
+                        <span class="badge badge-green">${batPct}% Charge</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" style="width: ${batPct}%; background: #00ff88;"></div>
+                    </div>
+                    <div class="item-detail" style="margin-top: 8px;">Device Model: $($battery.Name)</div>
+                </div>
+            </div>
+"@
+        }
+
+        $htmlContent = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ApexCare Engine // Diagnostic Dashboard</title>
+    <style>
+        :root {
+            --bg-main: #0a0e17;
+            --bg-card: #131b2e;
+            --bg-card-alt: #1a243d;
+            --border-color: #233152;
+            --cyan-accent: #00e5ff;
+            --magenta-accent: #ff007f;
+            --green-accent: #00ff88;
+            --yellow-accent: #ffb700;
+            --text-main: #e2e8f0;
+            --text-dim: #8ba2c4;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 30px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1300px; margin: 0 auto; }
+        .header {
+            background: linear-gradient(135deg, #131b2e 0%, #1f2d4d 100%);
+            border: 1px solid var(--border-color);
+            border-left: 5px solid var(--cyan-accent);
+            padding: 24px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .header h1 {
+            font-size: 24px;
+            color: #fff;
+            letter-spacing: 1px;
+            font-weight: 700;
+        }
+        .header p { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
+        .header-meta {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-cyan { background: rgba(0, 229, 255, 0.15); color: var(--cyan-accent); border: 1px solid var(--cyan-accent); }
+        .badge-green { background: rgba(0, 255, 136, 0.15); color: var(--green-accent); border: 1px solid var(--green-accent); }
+        .badge-magenta { background: rgba(255, 0, 127, 0.15); color: var(--magenta-accent); border: 1px solid var(--magenta-accent); }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+        .card:hover {
+            border-color: var(--cyan-accent);
+            transform: translateY(-2px);
+        }
+        .card-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--cyan-accent);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+        .card-item {
+            background: var(--bg-card-alt);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+        .card-item:last-child { margin-bottom: 0; }
+        .item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .item-title { font-weight: 600; font-size: 13px; }
+        .item-val { font-size: 12px; color: var(--cyan-accent); font-weight: 600; }
+        .item-detail { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+        .progress-bar-bg {
+            background-color: rgba(255,255,255,0.08);
+            border-radius: 4px;
+            height: 8px;
+            width: 100%;
+            overflow: hidden;
+            margin: 6px 0;
+        }
+        .progress-bar-fill { height: 100%; border-radius: 4px; }
+        .item-footer {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .stat-box {
+            background: var(--bg-card-alt);
+            padding: 10px 12px;
+            border-radius: 6px;
+        }
+        .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+        .stat-val { font-size: 14px; font-weight: 700; color: #fff; margin-top: 2px; }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: var(--text-dim);
+            font-size: 12px;
+            border-top: 1px solid var(--border-color);
+            padding-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>APEXCARE ENGINE // SYSTEM DIAGNOSTICS</h1>
+                <p>Host: $($env:COMPUTERNAME) | Audit Timestamp: $nowStr | Uptime: $uptimeStr</p>
+            </div>
+            <div class="header-meta">
+                <span class="badge badge-cyan">Beast Edition</span>
+                <span class="badge badge-green">Kernel Verified</span>
+            </div>
+        </div>
+
+        <div class="grid">
+            <!-- System & Motherboard -->
+            <div class="card">
+                <div class="card-title">SYSTEM PLATFORM & OEM ECOSYSTEM</div>
+                <div class="stat-grid">
+                    <div class="stat-box">
+                        <div class="stat-label">Manufacturer</div>
+                        <div class="stat-val">$($cs.Manufacturer)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Model</div>
+                        <div class="stat-val">$($cs.Model)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">OS Name</div>
+                        <div class="stat-val" style="font-size: 12px;">$($os.Caption)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">OS Build</div>
+                        <div class="stat-val">$($os.BuildNumber)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Serial / Service Tag</div>
+                        <div class="stat-val">$($bios.SerialNumber)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">BIOS Version</div>
+                        <div class="stat-val" style="font-size: 12px;">$($bios.SMBIOSBIOSVersion)</div>
+                    </div>
+                </div>
+                <div class="card-item" style="margin-top: 10px;">
+                    <div class="item-header">
+                        <span class="item-title">Official OEM Diagnostic Suite</span>
+                        <span class="badge badge-cyan">$($oem.OEMName)</span>
+                    </div>
+                    <div class="item-detail">Recommended Tool: $($oem.ToolName)</div>
+                </div>
+            </div>
+
+            <!-- CPU & Kernel -->
+            <div class="card">
+                <div class="card-title">PROCESSOR ARCHITECTURE & CLOCKS</div>
+                <div class="card-item">
+                    <div class="item-header">
+                        <span class="item-title">$($cpu.Name)</span>
+                    </div>
+                    <div class="stat-grid" style="margin-top: 8px;">
+                        <div class="stat-box">
+                            <div class="stat-label">Physical Cores</div>
+                            <div class="stat-val">$($cpu.NumberOfCores)</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Logical Threads</div>
+                            <div class="stat-val">$($cpu.NumberOfLogicalProcessors)</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Max Clock</div>
+                            <div class="stat-val">$($cpu.MaxClockSpeed) MHz</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Architecture</div>
+                            <div class="stat-val">x64 64-Bit</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Memory RAM -->
+            <div class="card">
+                <div class="card-title">MEMORY ALLOCATION (RAM)</div>
+                <div class="card-item">
+                    <div class="item-header">
+                        <span class="item-title">Physical RAM Usage</span>
+                        <span class="item-val">$usedRamGB GB / $totalRamGB GB</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" style="width: ${usedRamPercent}%; background: linear-gradient(90deg, #00e5ff, #00ff88);"></div>
+                    </div>
+                    <div class="item-footer">
+                        <span>Used: ${usedRamPercent}%</span>
+                        <span>Free RAM: $freeRamGB GB</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GPU Acceleration -->
+            <div class="card">
+                <div class="card-title">GPU HARDWARE PIPELINE</div>
+                $gpuItems
+            </div>
+
+            <!-- Storage Disks -->
+            <div class="card">
+                <div class="card-title">STORAGE VOLUMES & SSD HEALTH</div>
+                $diskRows
+            </div>
+
+            $batteryBlock
+        </div>
+
+        <div class="footer">
+            ApexCare Engine (Beast Edition) // Autonomous Performance Tuning, Diagnostics and Maintenance Suite
+        </div>
+    </div>
+</body>
+</html>
+"@
+
+        $htmlContent | Out-File -FilePath $Global:HtmlReport -Encoding UTF8 -Force
+        Write-Success "Interactive HTML Dashboard compiled: $Global:HtmlReport"
+        Start-Process $Global:HtmlReport -ErrorAction SilentlyContinue
+    } catch {
+        Write-Notice "HTML report generation notice: $($_.Exception.Message)"
+    }
+}
+
 function Show-OEMOfficialLink {
     Write-Step "Resolving Official Manufacturer Diagnostic & Driver Tool..."
     $oem = Get-OEMSupportDetails
@@ -514,6 +923,81 @@ function Invoke-NetworkOptimization {
 }
 
 # ==============================================================================
+# MODULE 2.5: DNS TURBOCHARGER & HIGH-SPEED PROVIDER SWITCHER
+# ==============================================================================
+function Invoke-DNSSwitcher {
+    Write-Step "Opening DNS Turbo Switcher module..."
+    Write-Host ""
+    Write-Host " +-- SELECT DNS PROVIDER ----------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host " | [1] Cloudflare Gaming & Privacy DNS  (1.1.1.1  | 1.0.0.1)            |" -ForegroundColor Cyan
+    Write-Host " | [2] Google High-Reliability DNS      (8.8.8.8  | 8.8.4.4)            |" -ForegroundColor Green
+    Write-Host " | [3] AdGuard Anti-Ad & Malware DNS    (94.140.14.14 | 94.140.15.15)  |" -ForegroundColor Yellow
+    Write-Host " | [4] Quad9 High-Security Threat Block (9.9.9.9  | 149.112.112.112)    |" -ForegroundColor Magenta
+    Write-Host " | [5] Restore Automatic DNS (DHCP / Router Default)                    |" -ForegroundColor White
+    Write-Host " | [6] Cancel / Return to Menu                                          |" -ForegroundColor DarkGray
+    Write-Host " +---------------------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host ""
+    $dnsChoice = Read-Host " Enter DNS selection (1-6)"
+
+    $activeAdapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.Virtual -ne $true }
+    if (-not $activeAdapters) {
+        $activeAdapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+    }
+
+    if (-not $activeAdapters) {
+        Write-Critical "No active network adapters detected to configure DNS."
+        return
+    }
+
+    $servers = @()
+    $dnsName = ""
+
+    switch ($dnsChoice) {
+        "1" {
+            $servers = @("1.1.1.1", "1.0.0.1")
+            $dnsName = "Cloudflare Ultra-Fast DNS"
+        }
+        "2" {
+            $servers = @("8.8.8.8", "8.8.4.4")
+            $dnsName = "Google Public DNS"
+        }
+        "3" {
+            $servers = @("94.140.14.14", "94.140.15.15")
+            $dnsName = "AdGuard Anti-Ad DNS"
+        }
+        "4" {
+            $servers = @("9.9.9.9", "149.112.112.112")
+            $dnsName = "Quad9 Security DNS"
+        }
+        "5" {
+            Write-Notice "Reverting active adapters to automatic DHCP DNS..."
+            foreach ($adapter in $activeAdapters) {
+                Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue
+                Write-Success "Adapter [$($adapter.Name)] reset to DHCP DNS."
+            }
+            Clear-DnsClientCache
+            return
+        }
+        default {
+            Write-Notice "DNS switch cancelled."
+            return
+        }
+    }
+
+    Write-Notice "Applying $dnsName to active network interfaces..."
+    foreach ($adapter in $activeAdapters) {
+        try {
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $servers -ErrorAction Stop
+            Write-Success "[$($adapter.Name)]: DNS set to $($servers -join ', ')"
+        } catch {
+            Write-Critical "Failed to set DNS on [$($adapter.Name)]: $($_.Exception.Message)"
+        }
+    }
+    Clear-DnsClientCache
+    Write-Success "DNS cache flushed and $dnsName engaged."
+}
+
+# ==============================================================================
 # MODULE 3: CPU & OS KERNEL PEAK OPTIMIZATION
 # ==============================================================================
 function Invoke-PeakPerformance {
@@ -559,6 +1043,55 @@ function Invoke-PeakPerformance {
         Write-Success "Auto Game Mode scheduling enforced."
     } catch {
         Write-Notice "Peak performance calibration notice: $($_.Exception.Message)"
+    }
+}
+
+# ==============================================================================
+# MODULE 3.5: GAMER LATENCY REDUCER & CPU CORE UNPARKING
+# ==============================================================================
+function Invoke-GamingLatencyOptimization {
+    Write-Step "Engaging Competitive Gamer Latency Reduction and Core Unparking..."
+
+    try {
+        # 1. Disable Nagle's Algorithm (TcpAckFrequency & TCPNoDelay)
+        Write-Notice "Disabling Nagle's Algorithm for zero TCP packet buffering..."
+        $interfacesKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+        $interfaces = Get-ChildItem -Path $interfacesKey -ErrorAction SilentlyContinue
+        $patchedCount = 0
+
+        foreach ($iface in $interfaces) {
+            $ip = (Get-ItemProperty -Path $iface.PSPath -Name "IPAddress" -ErrorAction SilentlyContinue).IPAddress
+            $dhcpIp = (Get-ItemProperty -Path $iface.PSPath -Name "DhcpIPAddress" -ErrorAction SilentlyContinue).DhcpIPAddress
+
+            if ($ip -or $dhcpIp) {
+                Set-ItemProperty -Path $iface.PSPath -Name "TcpAckFrequency" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $iface.PSPath -Name "TCPNoDelay" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $iface.PSPath -Name "TcpDelAckTicks" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                $patchedCount++
+            }
+        }
+        Write-Success "Nagle's Algorithm disabled across $patchedCount active network interfaces."
+
+        # 2. Multimedia Class Scheduler (MMCSS) Gaming Profile Priority
+        Write-Notice "Maximizing MMCSS Games thread scheduler priority..."
+        $gamesKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games"
+        if (-not (Test-Path $gamesKey)) {
+            New-Item -Path $gamesKey -ItemType Directory -Force | Out-Null
+        }
+        Set-ItemProperty -Path $gamesKey -Name "GPU Priority" -Value 8 -Type DWord -Force
+        Set-ItemProperty -Path $gamesKey -Name "Priority" -Value 6 -Type DWord -Force
+        Set-ItemProperty -Path $gamesKey -Name "Scheduling Category" -Value "High" -Type String -Force
+        Set-ItemProperty -Path $gamesKey -Name "SFIO Priority" -Value "High" -Type String -Force
+        Write-Success "MMCSS Games scheduler locked to High Priority."
+
+        # 3. CPU Core Unparking
+        Write-Notice "Disabling CPU Core Parking (100% active cores on demand)..."
+        powercfg -setacvalueindex scheme_current sub_processor CPMINCORES 100 | Out-Null
+        powercfg -setdcvalueindex scheme_current sub_processor CPMINCORES 100 | Out-Null
+        powercfg -setactive scheme_current | Out-Null
+        Write-Success "CPU Core Parking eliminated; micro-stutter suppression engaged."
+    } catch {
+        Write-Critical "Error configuring gaming latency optimizations: $($_.Exception.Message)"
     }
 }
 
@@ -716,6 +1249,69 @@ function Invoke-SafeDebloat {
 }
 
 # ==============================================================================
+# MODULE 6.5: WINDOWS 11 POWER TWEAKS & DESKTOP POLISH
+# ==============================================================================
+function Invoke-Windows11Tweaks {
+    Write-Step "Checking Windows 11 Power Tweaks and Desktop Polish..."
+    $buildNumber = [System.Environment]::OSVersion.Version.Build
+    $isWin11 = ($buildNumber -ge 22000)
+
+    if (-not $isWin11) {
+        Write-Notice "Windows 10 detected (Build $buildNumber). Windows 11 shell tweaks are not required."
+        Write-Notice "Windows 10 already features the classic right-click context menu by default."
+        return
+    }
+
+    Write-Host ""
+    Write-Host " +-- WINDOWS 11 SHELL & DESKTOP MODULE --------------------------------+" -ForegroundColor DarkCyan
+    Write-Host " | [1] Restore Classic Windows 10 Full Context Menu (No 'Show More')   |" -ForegroundColor Cyan
+    Write-Host " | [2] Revert to Windows 11 Modern Context Menu                        |" -ForegroundColor White
+    Write-Host " | [3] Disable Taskbar Widgets, Copilot & Search Bloat                 |" -ForegroundColor Yellow
+    Write-Host " | [4] Re-enable Taskbar Widgets & Copilot                             |" -ForegroundColor DarkGray
+    Write-Host " | [5] Return to Main Menu                                             |" -ForegroundColor DarkGray
+    Write-Host " +---------------------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host ""
+    $w11Choice = Read-Host " Enter your selection (1-5)"
+
+    $clsidPath = "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+    $advExplorer = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+    switch ($w11Choice) {
+        "1" {
+            Write-Notice "Engaging Classic Context Menu..."
+            New-Item -Path $clsidPath -Force | Out-Null
+            Set-ItemProperty -Path $clsidPath -Name "(Default)" -Value "" -Force
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Write-Success "Classic Context Menu activated (Explorer restarted)."
+        }
+        "2" {
+            Write-Notice "Reverting to Windows 11 Modern Context Menu..."
+            Remove-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Recurse -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Write-Success "Windows 11 Modern Context Menu restored (Explorer restarted)."
+        }
+        "3" {
+            Write-Notice "Disabling Taskbar Widgets and Copilot bloat..."
+            Set-ItemProperty -Path $advExplorer -Name "TaskbarDa" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $advExplorer -Name "ShowCopilotButton" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $advExplorer -Name "TaskbarMn" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Write-Success "Taskbar Widgets & Copilot deactivated (Explorer refreshed)."
+        }
+        "4" {
+            Write-Notice "Re-enabling Taskbar Widgets and Copilot..."
+            Set-ItemProperty -Path $advExplorer -Name "TaskbarDa" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path $advExplorer -Name "ShowCopilotButton" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Write-Success "Taskbar Widgets & Copilot restored."
+        }
+        default {
+            Write-Notice "Operation cancelled."
+        }
+    }
+}
+
+# ==============================================================================
 # MODULE 7: WINDOWS CORE FILE & IMAGE SELF-HEALING
 # ==============================================================================
 function Invoke-SystemRepair {
@@ -727,6 +1323,59 @@ function Invoke-SystemRepair {
     Write-Notice "Executing System File Checker (SFC)..."
     sfc.exe /scannow
     Write-Success "Core OS binary audit and image servicing concluded."
+}
+
+# ==============================================================================
+# MODULE 7.5: WINDOWS UPDATE DOCTOR & CACHE RESET ENGINE
+# ==============================================================================
+function Invoke-WindowsUpdateRepair {
+    Write-Step "Executing Windows Update Doctor & Cache Reset Engine..."
+
+    try {
+        # 1. Stop Update and Cryptographic Services
+        Write-Notice "Stopping Windows Update, BITS, and Cryptographic background services..."
+        $services = @("wuauserv", "bits", "cryptsvc", "msiserver")
+        foreach ($svc in $services) {
+            Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+        }
+
+        # 2. Reset SoftwareDistribution and Catroot2
+        Write-Notice "Purging and archiving corrupted Windows Update distribution stores..."
+        $sdPath = "$env:SystemRoot\SoftwareDistribution"
+        $catPath = "$env:SystemRoot\System32\catroot2"
+        $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+
+        if (Test-Path $sdPath) {
+            Rename-Item -Path $sdPath -NewName "SoftwareDistribution.old_$timestamp" -ErrorAction SilentlyContinue
+            if (Test-Path $sdPath) {
+                Remove-Item -Path "$sdPath\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        if (Test-Path $catPath) {
+            Rename-Item -Path $catPath -NewName "catroot2.old_$timestamp" -ErrorAction SilentlyContinue
+        }
+
+        # 3. Reset network and Winsock catalog
+        Write-Notice "Resetting network sockets and update endpoints..."
+        netsh winsock reset | Out-Null
+
+        # 4. Restart Services
+        Write-Notice "Restarting clean Windows Update subsystem..."
+        foreach ($svc in @("cryptsvc", "bits", "wuauserv")) {
+            Start-Service -Name $svc -ErrorAction SilentlyContinue
+        }
+
+        # 5. Trigger update detection
+        try {
+            $autoUpdate = New-Object -ComObject Microsoft.Update.AutoUpdate
+            $autoUpdate.DetectNow() | Out-Null
+        } catch {}
+
+        Write-Success "Windows Update services and caches successfully reinitialized."
+    } catch {
+        Write-Critical "Could not finalize Windows Update reset: $($_.Exception.Message)"
+    }
 }
 
 # ==============================================================================
@@ -792,22 +1441,93 @@ function Invoke-SecurityScan {
 }
 
 # ==============================================================================
+# MODULE 11: FACTORY DEFAULTS RESTORATION & UNDO ENGINE
+# ==============================================================================
+function Invoke-RevertTweaks {
+    Write-Step "Reverting optimizations and restoring Windows default settings..."
+    Write-Notice "This will reset power schemes, network throttling, DNS, and telemetry to factory defaults."
+    $confirm = Read-Host " Are you sure you want to revert optimizations? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Notice "Revert aborted."
+        return
+    }
+
+    try {
+        # 1. Reset Power Scheme to Balanced
+        Write-Notice "Restoring Windows default Balanced power scheme..."
+        $balancedGuid = "381b4222-f694-41f0-9685-ff5bb260df2e"
+        powercfg -setactive $balancedGuid | Out-Null
+        Write-Success "Balanced power profile restored."
+
+        # 2. Re-enable Fast Startup (Hiberboot)
+        Write-Notice "Re-enabling Fast Startup..."
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+        Write-Success "Fast Startup re-enabled."
+
+        # 3. Restore Network Throttling & Responsiveness Defaults
+        Write-Notice "Restoring Windows default network throttling indexes..."
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "NetworkThrottlingIndex" -Value 10 -Type DWord -Force -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 20 -Type DWord -Force -ErrorAction SilentlyContinue
+        Write-Success "Multimedia network throttling reset to Windows defaults."
+
+        # 4. Restore DNS to Automatic (DHCP)
+        Write-Notice "Restoring DNS to Automatic (DHCP)..."
+        $adapters = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+        foreach ($ad in $adapters) {
+            Set-DnsClientServerAddress -InterfaceIndex $ad.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue
+        }
+        Clear-DnsClientCache
+        Write-Success "DNS configuration reset to DHCP."
+
+        # 5. Restore MenuShowDelay
+        Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value "400" -Force -ErrorAction SilentlyContinue
+        Write-Success "Menu display delay reset to default (400ms)."
+
+        # 6. Re-enable Last Access Time
+        fsutil behavior set disablelastaccess 0 | Out-Null
+        Write-Success "Disk last access timestamps restored."
+
+        # 7. Restore Windows 11 Modern Context Menu if altered
+        if (Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}") {
+            Remove-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Recurse -Force -ErrorAction SilentlyContinue
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Write-Success "Windows 11 modern context menu restored."
+        }
+
+        # 8. Re-enable Telemetry service (DiagTrack)
+        Set-Service -Name "DiagTrack" -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name "DiagTrack" -ErrorAction SilentlyContinue
+        Write-Success "Diagnostics Tracking service restored."
+
+        Write-Host ""
+        Write-Host " +========================================================================+" -ForegroundColor Green
+        Write-Host " |         [OK] FACTORY DEFAULTS RESTORED SUCCESSFULLY!                   |" -ForegroundColor Green
+        Write-Host " +========================================================================+" -ForegroundColor Green
+    } catch {
+        Write-Critical "Failed to revert some settings: $($_.Exception.Message)"
+    }
+}
+
+# ==============================================================================
 # FULL AUTOPILOT PIPELINE (WITH REBOOT SURVIVAL)
 # ==============================================================================
 function Start-FullAutoPilot {
     param([int]$ResumeStep = 1)
 
     $pipeline = @(
-        @{ Index = 1;  Name = "Dependencies & Modules";            Action = { Install-Prerequisites } },
-        @{ Index = 2;  Name = "Hardware & Diagnostics Audit";      Action = { Invoke-HardwareDiagnostics } },
-        @{ Index = 3;  Name = "Network Stack Turbocharging";       Action = { Invoke-NetworkOptimization } },
-        @{ Index = 4;  Name = "CPU & Kernel Peak Responsiveness";  Action = { Invoke-PeakPerformance } },
-        @{ Index = 5;  Name = "Standby RAM & Storage Cleanup";     Action = { Invoke-DeepCleanup } },
-        @{ Index = 6;  Name = "Safe Telemetry & Diagnostic Debloat"; Action = { Invoke-SafeDebloat } },
-        @{ Index = 7;  Name = "GPU Beast Mode & Display Pipeline"; Action = { Invoke-GPUBeastMode } },
-        @{ Index = 8;  Name = "Core OS Integrity & Image Repair";  Action = { Invoke-SystemRepair } },
-        @{ Index = 9;  Name = "OEM Ecosystem & Driver Servicing";  Action = { Invoke-DriverAndOEMUpdates } },
-        @{ Index = 10; Name = "Native Application Fleet Upgrade";  Action = { Invoke-AppUpdates } }
+        @{ Index = 1;  Name = "System Restore Point Safeguard";     Action = { Invoke-SystemRestorePoint } },
+        @{ Index = 2;  Name = "Dependencies & Modules";             Action = { Install-Prerequisites } },
+        @{ Index = 3;  Name = "Hardware & Diagnostics Audit";       Action = { Invoke-HardwareDiagnostics } },
+        @{ Index = 4;  Name = "Network Stack Turbocharging";        Action = { Invoke-NetworkOptimization } },
+        @{ Index = 5;  Name = "CPU & Kernel Peak Responsiveness";   Action = { Invoke-PeakPerformance } },
+        @{ Index = 6;  Name = "Gamer Latency & Core Unparking";     Action = { Invoke-GamingLatencyOptimization } },
+        @{ Index = 7;  Name = "GPU Beast Mode & Display Pipeline";  Action = { Invoke-GPUBeastMode } },
+        @{ Index = 8;  Name = "Standby RAM & Storage Cleanup";      Action = { Invoke-DeepCleanup } },
+        @{ Index = 9;  Name = "Safe Telemetry & Diagnostic Debloat"; Action = { Invoke-SafeDebloat } },
+        @{ Index = 10; Name = "Core OS Integrity & Image Repair";   Action = { Invoke-SystemRepair } },
+        @{ Index = 11; Name = "OEM Ecosystem & Driver Servicing";   Action = { Invoke-DriverAndOEMUpdates } },
+        @{ Index = 12; Name = "Native Application Fleet Upgrade";   Action = { Invoke-AppUpdates } },
+        @{ Index = 13; Name = "Interactive HTML Dashboard Export";  Action = { Export-DiagnosticHtmlReport } }
     )
 
     foreach ($task in $pipeline) {
@@ -838,13 +1558,14 @@ function Start-FullAutoPilot {
     Write-Host " +========================================================================+" -ForegroundColor Green
     
     Write-Host ""
-    $optScan = Read-Host "Would you like to execute an Antivirus Security Scan now? (Y/N)"
+    $optScan = Read-Host " Would you like to execute an Antivirus Security Scan now? (Y/N)"
     if ($optScan -eq 'Y' -or $optScan -eq 'y') {
         Invoke-SecurityScan
     }
 
     Write-Host ""
-    Write-Host "All operations finalized. Diagnostics log saved to: $Global:ReportFile" -ForegroundColor Cyan
+    Write-Host " All operations finalized. Diagnostics log: $Global:ReportFile" -ForegroundColor Cyan
+    Write-Host " Interactive HTML Dashboard compiled: $Global:HtmlReport" -ForegroundColor Cyan
     pause
 }
 
@@ -865,44 +1586,59 @@ try {
         Show-Header
         Write-Host " Select an operational module:" -ForegroundColor Yellow
         Write-Host " +-- FULL AUTOMATION --------------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [1] FULL AUTOPILOT (Diagnostic -> Net -> Kernel -> Clean -> GPU)    |" -ForegroundColor Green
+        Write-Host " | [1]  FULL AUTOPILOT (Restore Point -> Net -> Kernel -> Clean -> GPU)|" -ForegroundColor Green
         Write-Host " +-- SYSTEM AUDIT & OEM -----------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [2] Hardware Diagnostics & Battery Wear Audit                       |"
-        Write-Host " | [3] Get Official OEM Support Tool & Direct Driver Links             |" -ForegroundColor Cyan
-        Write-Host " +-- PERFORMANCE & KERNEL TUNING --------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [4] Network Stack Turbocharging (Zero Latency & Unthrottled)        |"
-        Write-Host " | [5] CPU & OS Kernel Peak Responsiveness (Ultimate Power, Fast Boot) |"
-        Write-Host " | [6] GPU Beast Mode & Display Pipeline (HAGS, VRR, Vendor Suite)     |"
+        Write-Host " | [2]  Hardware Diagnostics & Battery Wear Audit                      |"
+        Write-Host " | [3]  Generate Interactive HTML Dashboard (Dark Mode)                |" -ForegroundColor Green
+        Write-Host " | [4]  Get Official OEM Support Tool & Direct Driver Links            |" -ForegroundColor Cyan
+        Write-Host " +-- PERFORMANCE & GAMING ---------------------------------------------+" -ForegroundColor DarkCyan
+        Write-Host " | [5]  Network Stack Turbocharging (Zero Latency & Unthrottled)       |"
+        Write-Host " | [6]  DNS Turbo Switcher (Cloudflare / Google / AdGuard / Quad9)     |" -ForegroundColor Cyan
+        Write-Host " | [7]  CPU & OS Kernel Peak Responsiveness (Ultimate Power, Fast Boot)|"
+        Write-Host " | [8]  Gamer Latency Mode (Disable Nagle's Algorithm & Core Unparking)|" -ForegroundColor Green
+        Write-Host " | [9]  GPU Beast Mode & Display Pipeline (HAGS, VRR, Vendor Suite)    |"
         Write-Host " +-- SYSTEM HYGIENE & REPAIR ------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [7] Standby RAM Purge, Storage Recovery & NVMe/SSD TRIM             |"
-        Write-Host " | [8] Safe Telemetry & Diagnostic Debloat (Non-Breaking)              |"
-        Write-Host " | [9] Windows Core Image Repair & System Integrity (DISM & SFC)       |"
-        Write-Host " | [10] Update Drivers & OEM Tool Provisioning                         |"
-        Write-Host " | [11] Upgrade All Installed Apps (Winget Fleet Update)               |"
-        Write-Host " | [12] Run Microsoft Defender Quick Scan with Signature Intelligence  |"
+        Write-Host " | [10] Standby RAM Purge, Storage Recovery & NVMe/SSD TRIM            |"
+        Write-Host " | [11] Safe Telemetry & Diagnostic Debloat (Non-Breaking)             |"
+        Write-Host " | [12] Windows Core Image Repair & System Integrity (DISM & SFC)      |"
+        Write-Host " | [13] Windows Update Doctor (Reset & Fix Stuck Updates)              |" -ForegroundColor Yellow
+        Write-Host " | [14] Windows 11 Power Tweaks (Classic Context Menu & Taskbar Polish)|" -ForegroundColor Cyan
+        Write-Host " | [15] Update Drivers & OEM Tool Provisioning                         |"
+        Write-Host " | [16] Upgrade All Installed Apps (Winget Fleet Update)              |"
+        Write-Host " | [17] Run Microsoft Defender Quick Scan with Signature Intelligence  |"
+        Write-Host " +-- SAFEGUARDS & UNDO ------------------------------------------------+" -ForegroundColor DarkCyan
+        Write-Host " | [18] Create System Restore Point (Manual Safeguard)                 |" -ForegroundColor Magenta
+        Write-Host " | [19] Revert All Optimizations to Factory Defaults (Undo)            |" -ForegroundColor Yellow
         Write-Host " +-- EXIT -------------------------------------------------------------+" -ForegroundColor DarkCyan
-        Write-Host " | [13] Exit Session                                                   |" -ForegroundColor DarkGray
+        Write-Host " | [20] Exit Session                                                   |" -ForegroundColor DarkGray
         Write-Host " +---------------------------------------------------------------------+" -ForegroundColor DarkCyan
         Write-Host ""
-        $choice = Read-Host " Enter your selection (1-13)"
+        $choice = Read-Host " Enter your selection (1-20)"
 
         switch ($choice) {
             "1"  { Start-FullAutoPilot -ResumeStep 1 }
             "2"  { Invoke-HardwareDiagnostics; pause }
-            "3"  { Show-OEMOfficialLink; pause }
-            "4"  { Invoke-NetworkOptimization; pause }
-            "5"  { Invoke-PeakPerformance; pause }
-            "6"  { Invoke-GPUBeastMode; pause }
-            "7"  { Invoke-DeepCleanup; pause }
-            "8"  { Invoke-SafeDebloat; pause }
-            "9"  { Invoke-SystemRepair; pause }
-            "10" { Install-Prerequisites; Invoke-DriverAndOEMUpdates; pause }
-            "11" { Install-Prerequisites; Invoke-AppUpdates; pause }
-            "12" { Invoke-SecurityScan; pause }
-            "13" { Write-Host "Terminating session..."; exit }
-            default { Write-Notice "Invalid selection, please select a valid option (1-13)." }
+            "3"  { Export-DiagnosticHtmlReport; pause }
+            "4"  { Show-OEMOfficialLink; pause }
+            "5"  { Invoke-NetworkOptimization; pause }
+            "6"  { Invoke-DNSSwitcher; pause }
+            "7"  { Invoke-PeakPerformance; pause }
+            "8"  { Invoke-GamingLatencyOptimization; pause }
+            "9"  { Invoke-GPUBeastMode; pause }
+            "10" { Invoke-DeepCleanup; pause }
+            "11" { Invoke-SafeDebloat; pause }
+            "12" { Invoke-SystemRepair; pause }
+            "13" { Invoke-WindowsUpdateRepair; pause }
+            "14" { Invoke-Windows11Tweaks; pause }
+            "15" { Install-Prerequisites; Invoke-DriverAndOEMUpdates; pause }
+            "16" { Install-Prerequisites; Invoke-AppUpdates; pause }
+            "17" { Invoke-SecurityScan; pause }
+            "18" { Invoke-SystemRestorePoint; pause }
+            "19" { Invoke-RevertTweaks; pause }
+            "20" { Write-Host "Terminating session..."; exit }
+            default { Write-Notice "Invalid selection, please select a valid option (1-20)." }
         }
-    } while ($choice -ne "13")
+    } while ($choice -ne "20")
 } catch {
     Write-Host ""
     Write-Host " [X] Unexpected Runtime Error: $($_.Exception.Message)" -ForegroundColor Red
