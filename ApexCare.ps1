@@ -1,13 +1,10 @@
-﻿<#
-    .NAME
-        ApexCare Engine (Beast Edition)
-    .DESCRIPTION
-        Enterprise-Grade Autonomous Windows Performance Tuning, Diagnostics, 
-        Kernel Optimization & Deep System Maintenance Suite.
-    .NOTES
-        Runs elevated, in-memory execution compatible, reboot survival state-machine,
-        Modern Fluent/Cyberpunk TUI, zero-latency network, GPU Beast Mode.
-#>
+# ==============================================================================
+# ApexCare Engine (Beast Edition)
+# Enterprise-Grade Autonomous Windows Performance Tuning, Diagnostics,
+# Kernel Optimization and Deep System Maintenance Suite.
+# Runs elevated, in-memory execution compatible, reboot survival state-machine,
+# Modern Fluent/Cyberpunk TUI, zero-latency network, GPU Beast Mode.
+# ==============================================================================
 
 # ==============================================================================
 # 0. RUNTIME INITIALIZATION & SELF-ELEVATION
