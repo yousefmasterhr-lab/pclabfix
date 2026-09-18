@@ -32,7 +32,7 @@ $Global:ReportFile = Join-Path $Global:AppDir "SystemReport.txt"
 $Global:ShortUrl = "https://tinyurl.com/pclabfix"
 $Global:RawUrl = "https://raw.githubusercontent.com/yousefmasterhr-lab/pclabfix/main/ApexCare.ps1"
 
-function Ensure-AppDirectory {
+function Initialize-AppDirectory {
     if (-not (Test-Path $Global:AppDir)) { 
         try {
             New-Item -Path $Global:AppDir -ItemType Directory -Force | Out-Null 
@@ -45,10 +45,10 @@ function Ensure-AppDirectory {
         }
     }
 }
-Ensure-AppDirectory
+Initialize-AppDirectory
 
 function Sync-LocalScript {
-    Ensure-AppDirectory
+    Initialize-AppDirectory
     try {
         $raw = ""
         try {
@@ -526,7 +526,7 @@ function Invoke-PeakPerformance {
         $highPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
 
         powercfg -duplicatescheme $ultimateGuid | Out-Null
-        $activeRes = powercfg -setactive $ultimateGuid 2>&1
+        powercfg -setactive $ultimateGuid 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Notice "Hardware profile restricted Ultimate Performance. Engaging High Performance plan..."
             powercfg -setactive $highPerfGuid | Out-Null
