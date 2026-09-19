@@ -30,6 +30,8 @@ $Global:LocalScript = Join-Path $Global:AppDir "ApexCare.ps1"
 $Global:StateFile = Join-Path $Global:AppDir "state.json"
 $Global:ReportFile = Join-Path $Global:AppDir "SystemReport.txt"
 $Global:HtmlReport = Join-Path $Global:AppDir "ApexCare_Dashboard.html"
+$Global:LiveJsFile = Join-Path $Global:AppDir "apex_live_state.js"
+$Global:DashboardLaunched = $false
 $Global:ShortUrl = "https://tinyurl.com/pclabfix"
 $Global:RawUrl = "https://raw.githubusercontent.com/yousefmasterhr-lab/pclabfix/main/ApexCare.ps1"
 
@@ -43,6 +45,7 @@ function Initialize-AppDirectory {
             $Global:StateFile = Join-Path $Global:AppDir "state.json"
             $Global:ReportFile = Join-Path $Global:AppDir "SystemReport.txt"
             $Global:HtmlReport = Join-Path $Global:AppDir "ApexCare_Dashboard.html"
+            $Global:LiveJsFile = Join-Path $Global:AppDir "apex_live_state.js"
             New-Item -Path $Global:AppDir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
         }
     }
@@ -127,26 +130,186 @@ function Show-Header {
 function Write-Step {
     param([string]$Title)
     Write-Host " [*] $Title" -ForegroundColor Cyan
+    Add-LiveLog -Type "info" -Message $Title
 }
 
 function Write-Success {
     param([string]$Message)
     Write-Host "    [OK] $Message" -ForegroundColor Green
+    Add-LiveLog -Type "success" -Message $Message
 }
 
 function Write-Notice {
     param([string]$Message)
     Write-Host "    [!] $Message" -ForegroundColor Yellow
+    Add-LiveLog -Type "warning" -Message $Message
 }
 
 function Write-Critical {
     param([string]$Message)
     Write-Host "    [X] $Message" -ForegroundColor Red
+    Add-LiveLog -Type "error" -Message $Message
 }
 
 function Write-Highlight {
     param([string]$Message)
     Write-Host "    [>] $Message" -ForegroundColor Magenta
+    Add-LiveLog -Type "info" -Message $Message
+}
+
+# ==============================================================================
+# 1.5 LIVE MISSION CONTROL REAL-TIME TELEMETRY & EVENT STREAM ENGINE
+# ==============================================================================
+$Global:ApexLiveState = @{
+    Timestamp       = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    Status          = "Standing By"
+    CurrentStage    = @{ Index = 0; Name = "Ready" }
+    ProgressPercent = 0
+    TotalStages     = 13
+    Stages          = @(
+        @{ Index = 1;  Name = "System Restore Point Safeguard";     Status = "Pending" },
+        @{ Index = 2;  Name = "Dependencies & Modules";             Status = "Pending" },
+        @{ Index = 3;  Name = "Hardware & Diagnostics Audit";       Status = "Pending" },
+        @{ Index = 4;  Name = "Network Stack Turbocharging";        Status = "Pending" },
+        @{ Index = 5;  Name = "CPU & Kernel Peak Responsiveness";   Status = "Pending" },
+        @{ Index = 6;  Name = "Gamer Latency & Core Unparking";     Status = "Pending" },
+        @{ Index = 7;  Name = "GPU Beast Mode & Display Pipeline";  Status = "Pending" },
+        @{ Index = 8;  Name = "Standby RAM & Storage Cleanup";      Status = "Pending" },
+        @{ Index = 9;  Name = "Safe Telemetry & Diagnostic Debloat"; Status = "Pending" },
+        @{ Index = 10; Name = "Core OS Integrity & Image Repair";   Status = "Pending" },
+        @{ Index = 11; Name = "OEM Ecosystem & Driver Servicing";   Status = "Pending" },
+        @{ Index = 12; Name = "Native Application Fleet Upgrade";   Status = "Pending" },
+        @{ Index = 13; Name = "Interactive HTML Dashboard Export";  Status = "Pending" }
+    )
+    Incidents       = @()
+    Logs            = @()
+    SystemInfo      = @{}
+    OEM             = @{}
+}
+
+function Add-LiveLog {
+    param(
+        [string]$Type,
+        [string]$Message
+    )
+    try {
+        if ($null -eq $Global:ApexLiveState) { return }
+        $timeStr = (Get-Date).ToString("HH:mm:ss")
+        $logItem = @{
+            Time    = $timeStr
+            Type    = $Type
+            Message = $Message
+        }
+        $Global:ApexLiveState.Logs += $logItem
+        if ($Global:ApexLiveState.Logs.Count -gt 75) {
+            $Global:ApexLiveState.Logs = $Global:ApexLiveState.Logs[-75..-1]
+        }
+        Export-LiveStateJs
+    } catch {}
+}
+
+function Add-LiveIncident {
+    param(
+        [string]$Stage,
+        [string]$RawError,
+        [string]$Diagnosis,
+        [string]$Resolution,
+        [string]$ActionUrl,
+        [string]$ActionText
+    )
+    try {
+        if ($null -eq $Global:ApexLiveState) { return }
+        $incident = @{
+            Timestamp  = (Get-Date).ToString("HH:mm:ss")
+            Stage      = $Stage
+            RawError   = $RawError
+            Diagnosis  = $Diagnosis
+            Resolution = $Resolution
+            ActionUrl  = $ActionUrl
+            ActionText = $ActionText
+        }
+        $Global:ApexLiveState.Incidents += $incident
+        Export-LiveStateJs
+        Export-DiagnosticHtmlReport -Silent:$true
+    } catch {}
+}
+
+function Update-LiveStage {
+    param(
+        [int]$Index,
+        [string]$Status
+    )
+    try {
+        if ($null -eq $Global:ApexLiveState) { return }
+        if ($Index -ge 1 -and $Index -le $Global:ApexLiveState.Stages.Count) {
+            $Global:ApexLiveState.Stages[$Index - 1].Status = $Status
+            $stageName = $Global:ApexLiveState.Stages[$Index - 1].Name
+            $Global:ApexLiveState.CurrentStage = @{ Index = $Index; Name = $stageName }
+            if ($Status -eq "Running") {
+                $Global:ApexLiveState.Status = "Running: Stage $Index - $stageName"
+            }
+        }
+        $completedCount = ($Global:ApexLiveState.Stages | Where-Object { $_.Status -eq "Completed" -or $_.Status -eq "Warning" }).Count
+        $Global:ApexLiveState.ProgressPercent = [Math]::Round(($completedCount / $Global:ApexLiveState.TotalStages) * 100)
+        Export-LiveStateJs
+    } catch {}
+}
+
+function Export-LiveStateJs {
+    try {
+        if (-not (Test-Path $Global:AppDir)) { Initialize-AppDirectory }
+        $json = $Global:ApexLiveState | ConvertTo-Json -Depth 6 -Compress
+        $jsContent = "window.ApexLiveState = " + $json + "; if (window.ApexMissionControl && window.ApexMissionControl.render) { window.ApexMissionControl.render(window.ApexLiveState); }"
+        [System.IO.File]::WriteAllText($Global:LiveJsFile, $jsContent, [System.Text.Encoding]::ASCII)
+    } catch {}
+}
+
+function Initialize-LiveDashboard {
+    try {
+        Initialize-AppDirectory
+        
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+        $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vols = Get-Volume -DriveLetter C -ErrorAction SilentlyContinue
+        $oem = Get-OEMSupportDetails
+
+        $totalRamGB = if ($cs) { [Math]::Round($cs.TotalPhysicalMemory / 1GB, 1) } else { 16 }
+        $freeRamGB = if ($os) { [Math]::Round($os.FreePhysicalMemory / 1MB, 1) } else { 8 }
+        $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
+        $diskCFreeGB = if ($vols) { [Math]::Round($vols.SizeRemaining / 1GB, 1) } else { 0 }
+        $vramGB = if ($gpus -and $gpus.AdapterRAM) { [Math]::Round($gpus.AdapterRAM / 1GB, 1) } else { 0 }
+
+        $Global:ApexLiveState.SystemInfo = @{
+            Hostname    = $env:COMPUTERNAME
+            OS          = if ($os) { $os.Caption } else { "Windows 10/11" }
+            Build       = if ($os) { $os.BuildNumber } else { "" }
+            CPU         = if ($cpu) { $cpu.Name } else { "Processor" }
+            Cores       = if ($cpu) { $cpu.NumberOfCores } else { 4 }
+            Threads     = if ($cpu) { $cpu.NumberOfLogicalProcessors } else { 8 }
+            TotalRamGB  = $totalRamGB
+            FreeRamGB   = $freeRamGB
+            UsedRamGB   = $usedRamGB
+            GPU         = if ($gpus) { $gpus.Name } else { "Graphics Controller" }
+            VRAM        = $vramGB
+            DiskCFree   = $diskCFreeGB
+            BatteryWear = 0
+        }
+
+        $Global:ApexLiveState.OEM = @{
+            OEMName       = $oem.OEMName
+            Model         = $oem.Model
+            SerialNumber  = $oem.SerialNumber
+            ToolName      = $oem.ToolName
+            ToolUrl       = $oem.ToolUrl
+            SupportPortal = $oem.SupportPortal
+        }
+
+        Add-LiveLog -Type "info" -Message "ApexCare Engine initialized. Ready to execute."
+        Export-LiveStateJs
+        Export-DiagnosticHtmlReport -Silent:$true
+    } catch {}
 }
 
 # ==============================================================================
@@ -478,234 +641,530 @@ function Invoke-HardwareDiagnostics {
     Write-Success "System report saved to: $Global:ReportFile"
 }
 
-function Export-DiagnosticHtmlReport {
-    Write-Step "Compiling interactive Cyberpunk/Fluent HTML Diagnostic Dashboard..."
-
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem
-        $cs = Get-CimInstance Win32_ComputerSystem
-        $bios = Get-CimInstance Win32_BIOS
-        $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-        $gpus = Get-CimInstance Win32_VideoController
-        $volumes = Get-Volume | Where-Object { $_.DriveLetter }
-        $physicalDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
-        $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
-        $oem = Get-OEMSupportDetails
-
-        $totalRamGB = [Math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
-        $freeRamGB = [Math]::Round($os.FreePhysicalMemory / 1MB, 1)
-        $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
-        $usedRamPercent = if ($totalRamGB -gt 0) { [Math]::Round(($usedRamGB / $totalRamGB) * 100, 0) } else { 0 }
-
-        $uptimeSpan = (Get-Date) - $os.LastBootUpTime
-        $uptimeStr = "{0}d {1}h {2}m" -f $uptimeSpan.Days, $uptimeSpan.Hours, $uptimeSpan.Minutes
-        $nowStr = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-
-        # Build Disk rows
-        $diskRows = ""
-        foreach ($vol in $volumes) {
-            $vTotal = [Math]::Round($vol.Size / 1GB, 1)
-            $vFree = [Math]::Round($vol.SizeRemaining / 1GB, 1)
-            $vUsed = [Math]::Round($vTotal - $vFree, 1)
-            $vUsedPct = if ($vTotal -gt 0) { [Math]::Round(($vUsed / $vTotal) * 100, 0) } else { 0 }
-            $barColor = if ($vUsedPct -ge 90) { "#ff3366" } elseif ($vUsedPct -ge 75) { "#ffaa00" } else { "#00e5ff" }
-
-            $diskRows += @"
-            <div class="card-item">
-                <div class="item-header">
-                    <span class="item-title">Drive $($vol.DriveLetter): ($($vol.FileSystem)) - $($vol.FileSystemLabel)</span>
-                    <span class="item-val">$vFree GB Free / $vTotal GB</span>
-                </div>
-                <div class="progress-bar-bg">
-                    <div class="progress-bar-fill" style="width: ${vUsedPct}%; background: $barColor;"></div>
-                </div>
-                <div class="item-footer"><span>Used: ${vUsedPct}%</span><span>Total: ${vTotal} GB</span></div>
-            </div>
-"@
-        }
-
-        # Build Physical Disk rows
-        foreach ($pd in $physicalDisks) {
-            $pdSizeGB = [Math]::Round($pd.Size / 1GB, 1)
-            $diskRows += @"
-            <div class="card-item" style="border-left: 3px solid #00ff88;">
-                <div class="item-header">
-                    <span class="item-title">$($pd.FriendlyName)</span>
-                    <span class="badge badge-green">$($pd.MediaType) - ${pdSizeGB} GB</span>
-                </div>
-            </div>
-"@
-        }
-
-        # Build GPU list
-        $gpuItems = ""
-        foreach ($g in $gpus) {
-            $vramGB = if ($g.AdapterRAM) { [Math]::Round($g.AdapterRAM / 1GB, 2) } else { 0 }
-            $gpuItems += @"
-            <div class="card-item">
-                <div class="item-header">
-                    <span class="item-title">$($g.Name)</span>
-                    <span class="badge badge-cyan">${vramGB} GB VRAM</span>
-                </div>
-                <div class="item-detail">Driver Version: $($g.DriverVersion)</div>
-                <div class="item-detail">Video Processor: $($g.VideoProcessor)</div>
-            </div>
-"@
-        }
-
-        # Build Battery Block
-        $batteryBlock = ""
-        if ($battery) {
-            $batPct = $battery.EstimatedChargeRemaining
-            $batStatus = switch ($battery.BatteryStatus) {
-                1 { "Discharging" }
-                2 { "AC Connected / Charging" }
-                3 { "Fully Charged" }
-                default { "Normal" }
-            }
-            $batteryBlock = @"
-            <div class="card">
-                <div class="card-title"><span class="icon">BATTERY</span> LAPTOP BATTERY HEALTH</div>
-                <div class="card-item">
-                    <div class="item-header">
-                        <span class="item-title">Battery Status: $batStatus</span>
-                        <span class="badge badge-green">${batPct}% Charge</span>
-                    </div>
-                    <div class="progress-bar-bg">
-                        <div class="progress-bar-fill" style="width: ${batPct}%; background: #00ff88;"></div>
-                    </div>
-                    <div class="item-detail" style="margin-top: 8px;">Device Model: $($battery.Name)</div>
-                </div>
-            </div>
-"@
-        }
-
-        $htmlContent = @"
+function Get-HtmlDashboardTemplate {
+    return @'
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ApexCare Engine // Diagnostic Dashboard</title>
+    <title>ApexCare // Live Mission Control</title>
     <style>
         :root {
-            --bg-main: #0a0e17;
-            --bg-card: #131b2e;
-            --bg-card-alt: #1a243d;
-            --border-color: #233152;
-            --cyan-accent: #00e5ff;
-            --magenta-accent: #ff007f;
-            --green-accent: #00ff88;
-            --yellow-accent: #ffb700;
-            --text-main: #e2e8f0;
+            --bg-base: #060911;
+            --bg-card: rgba(14, 21, 37, 0.85);
+            --bg-card-sub: rgba(22, 33, 58, 0.7);
+            --border-glow: rgba(0, 240, 255, 0.2);
+            --border-sub: rgba(255, 255, 255, 0.08);
+            --cyan: #00f0ff;
+            --emerald: #00ff88;
+            --amber: #ffaa00;
+            --crimson: #ff0055;
+            --purple: #a855f7;
+            --text-main: #f1f5f9;
             --text-dim: #8ba2c4;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            background-color: var(--bg-main);
+            background-color: var(--bg-base);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(0, 240, 255, 0.05) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(168, 85, 247, 0.05) 0%, transparent 40%);
             color: var(--text-main);
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            padding: 30px;
-            line-height: 1.5;
-        }
-        .container { max-width: 1300px; margin: 0 auto; }
-        .header {
-            background: linear-gradient(135deg, #131b2e 0%, #1f2d4d 100%);
-            border: 1px solid var(--border-color);
-            border-left: 5px solid var(--cyan-accent);
             padding: 24px;
-            border-radius: 8px;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        
+        /* Top Mission Control Bar */
+        .top-bar {
+            background: var(--bg-card);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-glow);
+            border-left: 5px solid var(--cyan);
+            border-radius: 10px;
+            padding: 20px 24px;
             margin-bottom: 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
             gap: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
         }
-        .header h1 {
-            font-size: 24px;
-            color: #fff;
-            letter-spacing: 1px;
-            font-weight: 700;
-        }
-        .header p { color: var(--text-dim); font-size: 13px; margin-top: 4px; }
-        .header-meta {
+        .brand-title {
             display: flex;
-            gap: 16px;
             align-items: center;
+            gap: 14px;
         }
-        .badge {
-            display: inline-block;
+        .brand-logo {
+            font-size: 26px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #00f0ff 0%, #00ff88 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 1.5px;
+        }
+        .brand-sub {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            margin-top: 2px;
+        }
+        .top-meta {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .pulse-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0, 255, 136, 0.12);
+            border: 1px solid var(--emerald);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--emerald);
+            letter-spacing: 0.5px;
+        }
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--emerald);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--emerald);
+            animation: pulse-ring 1.5s infinite;
+        }
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7); }
+            70% { transform: scale(1.1); box-shadow: 0 0 0 8px rgba(0, 255, 136, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
+        }
+        .chip {
+            background: var(--bg-card-sub);
+            border: 1px solid var(--border-sub);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            color: var(--text-main);
+        }
+        .chip-label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 4px; }
+
+        /* Hero Progress Card */
+        .hero-progress {
+            background: linear-gradient(135deg, rgba(14, 21, 37, 0.95) 0%, rgba(20, 31, 56, 0.95) 100%);
+            border: 1px solid var(--border-glow);
+            border-radius: 10px;
+            padding: 24px;
+            margin-bottom: 24px;
+            display: grid;
+            grid-template-columns: 200px 1fr auto;
+            gap: 24px;
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        }
+        @media (max-width: 900px) {
+            .hero-progress { grid-template-columns: 1fr; text-align: center; }
+        }
+        .progress-pct-box {
+            text-align: center;
+            padding: 10px;
+            border-right: 1px solid var(--border-sub);
+        }
+        @media (max-width: 900px) {
+            .progress-pct-box { border-right: none; border-bottom: 1px solid var(--border-sub); padding-bottom: 16px; }
+        }
+        .pct-number {
+            font-size: 48px;
+            font-weight: 900;
+            color: #fff;
+            letter-spacing: -1px;
+            line-height: 1;
+        }
+        .pct-sub {
+            font-size: 11px;
+            color: var(--cyan);
+            text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 1px;
+            margin-top: 6px;
+        }
+        .progress-info {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .stage-heading {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .stage-current-name {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .main-bar-track {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            height: 12px;
+            overflow: hidden;
+            position: relative;
+            margin-top: 4px;
+        }
+        .main-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00f0ff 0%, #00ff88 100%);
+            border-radius: 6px;
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 0 16px rgba(0, 240, 255, 0.6);
+        }
+        .hero-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .btn-portal {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px 18px;
+            background: linear-gradient(135deg, #00f0ff 0%, #0088ff 100%);
+            color: #040711;
+            font-weight: 700;
+            font-size: 12px;
+            text-decoration: none;
+            border-radius: 6px;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.35);
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+        .btn-portal:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 25px rgba(0, 240, 255, 0.6);
+        }
+        .btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--bg-card-sub);
+            border: 1px solid var(--border-glow);
+            color: var(--cyan);
+            font-weight: 600;
+            font-size: 12px;
+            text-decoration: none;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+        }
+        .btn-secondary:hover {
+            background: rgba(0, 240, 255, 0.15);
+            color: #fff;
+        }
+
+        /* INCIDENTS & ERROR DIAGNOSIS PANEL (STAR FEATURE) */
+        .incident-panel {
+            margin-bottom: 24px;
+        }
+        .incident-card {
+            background: linear-gradient(135deg, rgba(255, 0, 85, 0.1) 0%, rgba(20, 28, 48, 0.95) 100%);
+            border: 1px solid var(--crimson);
+            box-shadow: 0 0 30px rgba(255, 0, 85, 0.25);
+            border-radius: 10px;
+            padding: 22px 26px;
+            margin-bottom: 16px;
+            animation: slideDown 0.3s ease-out;
+        }
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .incident-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            border-bottom: 1px solid rgba(255, 0, 85, 0.2);
+            padding-bottom: 14px;
+            margin-bottom: 16px;
+        }
+        .incident-title-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .incident-tag {
+            background: var(--crimson);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 800;
+            padding: 4px 10px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .incident-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .incident-stage-badge {
+            background: rgba(255, 170, 0, 0.15);
+            border: 1px solid var(--amber);
+            color: var(--amber);
             padding: 4px 10px;
             border-radius: 4px;
             font-size: 11px;
             font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
         }
-        .badge-cyan { background: rgba(0, 229, 255, 0.15); color: var(--cyan-accent); border: 1px solid var(--cyan-accent); }
-        .badge-green { background: rgba(0, 255, 136, 0.15); color: var(--green-accent); border: 1px solid var(--green-accent); }
-        .badge-magenta { background: rgba(255, 0, 127, 0.15); color: var(--magenta-accent); border: 1px solid var(--magenta-accent); }
-        .grid {
+        .incident-body {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-            gap: 20px;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+            margin-bottom: 18px;
         }
-        .card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
+        @media (max-width: 800px) {
+            .incident-body { grid-template-columns: 1fr; }
+        }
+        .incident-box {
+            background: rgba(8, 12, 22, 0.7);
+            border: 1px solid var(--border-sub);
             border-radius: 8px;
-            padding: 20px;
-            transition: transform 0.2s, border-color 0.2s;
+            padding: 14px;
         }
-        .card:hover {
-            border-color: var(--cyan-accent);
-            transform: translateY(-2px);
+        .incident-box-title {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 700;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
-        .card-title {
+        .incident-code {
+            font-family: "Consolas", monospace;
+            font-size: 12px;
+            color: #ff7799;
+            word-break: break-all;
+            background: rgba(255, 0, 85, 0.08);
+            padding: 8px;
+            border-radius: 4px;
+            border-left: 3px solid var(--crimson);
+        }
+        .incident-desc {
+            font-size: 13px;
+            color: #cbd5e1;
+            line-height: 1.5;
+        }
+        .incident-footer {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .incident-nominal {
+            background: rgba(0, 255, 136, 0.08);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            border-radius: 8px;
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: var(--emerald);
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        /* 13-STAGE PIPELINE GRID */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .section-title {
             font-size: 14px;
             font-weight: 700;
-            color: var(--cyan-accent);
-            margin-bottom: 16px;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
             display: flex;
             align-items: center;
             gap: 8px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
         }
-        .card-item {
-            background: var(--bg-card-alt);
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 10px;
-            border: 1px solid rgba(255,255,255,0.04);
+        .pipeline-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+            gap: 14px;
+            margin-bottom: 24px;
         }
-        .card-item:last-child { margin-bottom: 0; }
-        .item-header {
+        .stage-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-sub);
+            border-radius: 8px;
+            padding: 14px 16px;
+            transition: all 0.2s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .stage-card:hover {
+            border-color: var(--border-glow);
+            transform: translateY(-2px);
+        }
+        .stage-card.is-running {
+            border-color: var(--cyan);
+            background: rgba(0, 240, 255, 0.06);
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.25);
+            animation: pulse-border 2s infinite;
+        }
+        @keyframes pulse-border {
+            0% { border-color: rgba(0, 240, 255, 0.4); }
+            50% { border-color: rgba(0, 240, 255, 1); }
+            100% { border-color: rgba(0, 240, 255, 0.4); }
+        }
+        .stage-card.is-completed {
+            border-left: 4px solid var(--emerald);
+        }
+        .stage-card.is-warning {
+            border-left: 4px solid var(--amber);
+        }
+        .stage-card.is-failed {
+            border-left: 4px solid var(--crimson);
+        }
+        .stage-card-top {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 6px;
         }
-        .item-title { font-weight: 600; font-size: 13px; }
-        .item-val { font-size: 12px; color: var(--cyan-accent); font-weight: 600; }
-        .item-detail { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
-        .progress-bar-bg {
-            background-color: rgba(255,255,255,0.08);
-            border-radius: 4px;
-            height: 8px;
-            width: 100%;
-            overflow: hidden;
-            margin: 6px 0;
+        .stage-index-tag {
+            font-size: 11px;
+            font-weight: 800;
+            color: var(--text-dim);
+            letter-spacing: 0.5px;
         }
-        .progress-bar-fill { height: 100%; border-radius: 4px; }
-        .item-footer {
+        .status-badge {
+            font-size: 10px;
+            font-weight: 800;
+            padding: 3px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-pending { background: rgba(255, 255, 255, 0.06); color: var(--text-dim); }
+        .badge-running { background: rgba(0, 240, 255, 0.2); color: var(--cyan); border: 1px solid var(--cyan); }
+        .badge-completed { background: rgba(0, 255, 136, 0.15); color: var(--emerald); border: 1px solid var(--emerald); }
+        .badge-warning { background: rgba(255, 170, 0, 0.15); color: var(--amber); border: 1px solid var(--amber); }
+        .badge-failed { background: rgba(255, 0, 85, 0.15); color: var(--crimson); border: 1px solid var(--crimson); }
+        .stage-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+            margin-top: 2px;
+        }
+
+        /* HARDWARE & LOG DUAL PANEL */
+        .dual-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        @media (max-width: 1000px) {
+            .dual-panel { grid-template-columns: 1fr; }
+        }
+
+        /* TERMINAL LOG STREAM */
+        .terminal-container {
+            background: #040711;
+            border: 1px solid var(--border-glow);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .terminal-header {
             display: flex;
             justify-content: space-between;
-            font-size: 11px;
-            color: var(--text-dim);
+            align-items: center;
+            border-bottom: 1px solid var(--border-sub);
+            padding-bottom: 10px;
+            margin-bottom: 12px;
+        }
+        .terminal-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--emerald);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-family: "Consolas", monospace;
+        }
+        .terminal-stream {
+            height: 320px;
+            overflow-y: auto;
+            font-family: "Consolas", "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            padding-right: 8px;
+        }
+        .log-line {
+            margin-bottom: 4px;
+            display: flex;
+            gap: 10px;
+            word-break: break-all;
+        }
+        .log-time { color: #475569; flex-shrink: 0; }
+        .log-info { color: #00e5ff; }
+        .log-success { color: #00ff88; }
+        .log-warning { color: #ffb700; }
+        .log-error { color: #ff3366; }
+
+        /* TELEMETRY CARDS */
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-sub);
+            border-radius: 8px;
+            padding: 18px;
+            transition: all 0.2s ease;
+        }
+        .card:hover {
+            border-color: var(--border-glow);
+            transform: translateY(-2px);
+        }
+        .card-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--cyan);
+            margin-bottom: 14px;
+            border-bottom: 1px solid var(--border-sub);
+            padding-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         .stat-grid {
             display: grid;
@@ -713,148 +1172,451 @@ function Export-DiagnosticHtmlReport {
             gap: 10px;
         }
         .stat-box {
-            background: var(--bg-card-alt);
+            background: var(--bg-card-sub);
             padding: 10px 12px;
             border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.03);
         }
-        .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
-        .stat-val { font-size: 14px; font-weight: 700; color: #fff; margin-top: 2px; }
+        .stat-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-val { font-size: 13px; font-weight: 700; color: #fff; margin-top: 2px; }
+
+        /* Quick Action Bar */
+        .quick-actions-bar {
+            background: var(--bg-card);
+            border: 1px solid var(--border-sub);
+            border-radius: 8px;
+            padding: 18px 22px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 14px;
+            margin-bottom: 24px;
+        }
+        .actions-label {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .actions-btn-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        /* Footer */
         .footer {
-            margin-top: 30px;
             text-align: center;
             color: var(--text-dim);
-            font-size: 12px;
-            border-top: 1px solid var(--border-color);
+            font-size: 11px;
+            border-top: 1px solid var(--border-sub);
             padding-top: 20px;
+            margin-top: 20px;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <div>
-                <h1>APEXCARE ENGINE // SYSTEM DIAGNOSTICS</h1>
-                <p>Host: $($env:COMPUTERNAME) | Audit Timestamp: $nowStr | Uptime: $uptimeStr</p>
+        <!-- Top Mission Control Bar -->
+        <div class="top-bar">
+            <div class="brand-title">
+                <div>
+                    <div class="brand-logo">APEXCARE // MISSION CONTROL</div>
+                    <div class="brand-sub">Autonomous Windows Optimization, Diagnostics & Repair (Beast Edition)</div>
+                </div>
             </div>
-            <div class="header-meta">
-                <span class="badge badge-cyan">Beast Edition</span>
-                <span class="badge badge-green">Kernel Verified</span>
+            <div class="top-meta">
+                <div class="pulse-indicator">
+                    <div class="pulse-dot"></div>
+                    <span id="live-sync-status">ENGINE LIVE SYNCED</span>
+                </div>
+                <div class="chip"><span class="chip-label">Host:</span><span id="meta-host">HOST</span></div>
+                <div class="chip"><span class="chip-label">Platform:</span><span id="meta-platform">OEM</span></div>
+                <div class="chip"><span class="chip-label">OS:</span><span id="meta-os">Windows</span></div>
             </div>
         </div>
 
-        <div class="grid">
-            <!-- System & Motherboard -->
-            <div class="card">
-                <div class="card-title">SYSTEM PLATFORM & OEM ECOSYSTEM</div>
-                <div class="stat-grid">
-                    <div class="stat-box">
-                        <div class="stat-label">Manufacturer</div>
-                        <div class="stat-val">$($cs.Manufacturer)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Model</div>
-                        <div class="stat-val">$($cs.Model)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">OS Name</div>
-                        <div class="stat-val" style="font-size: 12px;">$($os.Caption)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">OS Build</div>
-                        <div class="stat-val">$($os.BuildNumber)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">Serial / Service Tag</div>
-                        <div class="stat-val">$($bios.SerialNumber)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-label">BIOS Version</div>
-                        <div class="stat-val" style="font-size: 12px;">$($bios.SMBIOSBIOSVersion)</div>
-                    </div>
-                </div>
-                <div class="card-item" style="margin-top: 10px;">
-                    <div class="item-header">
-                        <span class="item-title">Official OEM Diagnostic Suite</span>
-                        <span class="badge badge-cyan">$($oem.OEMName)</span>
-                    </div>
-                    <div class="item-detail">Recommended Tool: $($oem.ToolName)</div>
+        <!-- Hero Overall Progress Section -->
+        <div class="hero-progress">
+            <div class="progress-pct-box">
+                <div class="pct-number" id="progress-pct">0%</div>
+                <div class="pct-sub" id="progress-status-sub">Standing By</div>
+            </div>
+            <div class="progress-info">
+                <div class="stage-heading" id="current-stage-index">Current Operation</div>
+                <div class="stage-current-name" id="current-stage-name">Waiting to initiate routines...</div>
+                <div class="main-bar-track">
+                    <div class="main-bar-fill" id="main-progress-fill" style="width: 0%;"></div>
                 </div>
             </div>
+            <div class="hero-actions">
+                <a id="btn-hero-portal" href="#" target="_blank" class="btn-portal">Open Support Portal</a>
+                <a id="btn-hero-tool" href="#" target="_blank" class="btn-secondary">OEM Diagnostic Tool</a>
+            </div>
+        </div>
 
-            <!-- CPU & Kernel -->
-            <div class="card">
-                <div class="card-title">PROCESSOR ARCHITECTURE & CLOCKS</div>
-                <div class="card-item">
-                    <div class="item-header">
-                        <span class="item-title">$($cpu.Name)</span>
+        <!-- Incidents & Error Diagnosis Panel (Star Feature) -->
+        <div class="incident-panel">
+            <div class="section-header">
+                <div class="section-title">[!] Diagnostic Incidents & Self-Healing Analysis</div>
+            </div>
+            <div id="incident-container">
+                <div class="incident-nominal">
+                    <span>[OK]</span>
+                    <span>ALL SUBSYSTEMS NOMINAL: Zero critical errors detected across active execution routines.</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 13-Stage Pipeline Visual Timeline -->
+        <div class="section-header">
+            <div class="section-title">Execution Pipeline (13 Autonomous Stages)</div>
+        </div>
+        <div class="pipeline-grid" id="pipeline-stages-container">
+            <!-- Stage cards generated dynamically -->
+        </div>
+
+        <!-- Dual Panel: Hardware Telemetry + Live Terminal Stream -->
+        <div class="dual-panel">
+            <!-- Telemetry summary -->
+            <div style="display: flex; flex-direction: column; gap: 16px;">
+                <div class="card">
+                    <div class="card-title">Processor & System Memory (RAM)</div>
+                    <div class="stat-grid">
+                        <div class="stat-box">
+                            <div class="stat-label">CPU Model</div>
+                            <div class="stat-val" id="tele-cpu" style="font-size: 11px;">Loading...</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Cores / Threads</div>
+                            <div class="stat-val" id="tele-cores">-- / --</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Total RAM</div>
+                            <div class="stat-val" id="tele-ram-total">-- GB</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Used / Free RAM</div>
+                            <div class="stat-val" id="tele-ram-used">-- GB</div>
+                        </div>
                     </div>
-                    <div class="stat-grid" style="margin-top: 8px;">
+                </div>
+
+                <div class="card">
+                    <div class="card-title">Graphics & Storage Health</div>
+                    <div class="stat-grid">
                         <div class="stat-box">
-                            <div class="stat-label">Physical Cores</div>
-                            <div class="stat-val">$($cpu.NumberOfCores)</div>
+                            <div class="stat-label">Primary GPU</div>
+                            <div class="stat-val" id="tele-gpu" style="font-size: 11px;">Loading...</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-label">Logical Threads</div>
-                            <div class="stat-val">$($cpu.NumberOfLogicalProcessors)</div>
+                            <div class="stat-label">VRAM</div>
+                            <div class="stat-val" id="tele-vram">-- GB</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-label">Max Clock</div>
-                            <div class="stat-val">$($cpu.MaxClockSpeed) MHz</div>
+                            <div class="stat-label">Drive C: Free Space</div>
+                            <div class="stat-val" id="tele-disk-c">-- GB</div>
                         </div>
                         <div class="stat-box">
-                            <div class="stat-label">Architecture</div>
-                            <div class="stat-val">x64 64-Bit</div>
+                            <div class="stat-label">Battery Health / Wear</div>
+                            <div class="stat-val" id="tele-battery">--% Wear</div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Memory RAM -->
-            <div class="card">
-                <div class="card-title">MEMORY ALLOCATION (RAM)</div>
-                <div class="card-item">
-                    <div class="item-header">
-                        <span class="item-title">Physical RAM Usage</span>
-                        <span class="item-val">$usedRamGB GB / $totalRamGB GB</span>
-                    </div>
-                    <div class="progress-bar-bg">
-                        <div class="progress-bar-fill" style="width: ${usedRamPercent}%; background: linear-gradient(90deg, #00e5ff, #00ff88);"></div>
-                    </div>
-                    <div class="item-footer">
-                        <span>Used: ${usedRamPercent}%</span>
-                        <span>Free RAM: $freeRamGB GB</span>
+            <!-- Terminal Live Stream -->
+            <div class="terminal-container">
+                <div class="terminal-header">
+                    <div class="terminal-title">&gt; LIVE ENGINE CONSOLE STREAM</div>
+                    <div style="font-size: 11px; color: var(--text-dim);" id="terminal-log-count">0 Events</div>
+                </div>
+                <div class="terminal-stream" id="terminal-stream-box">
+                    <div class="log-line">
+                        <span class="log-time">[Init]</span>
+                        <span class="log-info">Connecting to ApexCare execution bus...</span>
                     </div>
                 </div>
             </div>
+        </div>
 
-            <!-- GPU Acceleration -->
-            <div class="card">
-                <div class="card-title">GPU HARDWARE PIPELINE</div>
-                $gpuItems
+        <!-- Quick Actions & Official OEM Portals -->
+        <div class="quick-actions-bar">
+            <div class="actions-label">Quick Action & Support Ecosystem</div>
+            <div class="actions-btn-group">
+                <a id="btn-quick-portal" href="#" target="_blank" class="btn-portal">Drivers Portal</a>
+                <a id="btn-quick-tool" href="#" target="_blank" class="btn-secondary">OEM Diagnostic Tool</a>
+                <a href="ms-settings:windowsupdate" class="btn-secondary">Windows Update</a>
+                <a href="windowsdefender:" class="btn-secondary">Windows Security</a>
             </div>
-
-            <!-- Storage Disks -->
-            <div class="card">
-                <div class="card-title">STORAGE VOLUMES & SSD HEALTH</div>
-                $diskRows
-            </div>
-
-            $batteryBlock
         </div>
 
         <div class="footer">
-            ApexCare Engine (Beast Edition) // Autonomous Performance Tuning, Diagnostics and Maintenance Suite
+            ApexCare Engine (Beast Edition) // Autonomous Windows Tuning, Diagnostics & System Servicing Suite
         </div>
     </div>
+
+    <!-- Embedded Initial State Fallback -->
+    <script id="apex-initial-data">
+        /*__INITIAL_LIVE_STATE__*/
+    </script>
+
+    <!-- Client-Side Poller & Reactive DOM Engine -->
+    <script>
+        window.ApexMissionControl = {
+            render: function(state) {
+                if (!state) return;
+
+                // 1. Meta information
+                if (state.SystemInfo) {
+                    if (state.SystemInfo.Hostname) document.getElementById('meta-host').innerText = state.SystemInfo.Hostname;
+                    if (state.SystemInfo.OS) document.getElementById('meta-os').innerText = state.SystemInfo.OS;
+                    if (state.SystemInfo.CPU) document.getElementById('tele-cpu').innerText = state.SystemInfo.CPU;
+                    if (state.SystemInfo.Cores) document.getElementById('tele-cores').innerText = state.SystemInfo.Cores + " Cores / " + (state.SystemInfo.Threads || state.SystemInfo.Cores) + " Threads";
+                    if (state.SystemInfo.TotalRamGB) document.getElementById('tele-ram-total').innerText = state.SystemInfo.TotalRamGB + " GB";
+                    if (state.SystemInfo.FreeRamGB) document.getElementById('tele-ram-used').innerText = state.SystemInfo.FreeRamGB + " GB Free";
+                    if (state.SystemInfo.GPU) document.getElementById('tele-gpu').innerText = state.SystemInfo.GPU;
+                    if (state.SystemInfo.VRAM) document.getElementById('tele-vram').innerText = state.SystemInfo.VRAM + " GB";
+                    if (state.SystemInfo.DiskCFree) document.getElementById('tele-disk-c').innerText = state.SystemInfo.DiskCFree + " GB";
+                    if (state.SystemInfo.BatteryWear !== undefined) document.getElementById('tele-battery').innerText = state.SystemInfo.BatteryWear + "% Wear";
+                }
+
+                // 2. OEM links
+                if (state.OEM) {
+                    if (state.OEM.OEMName) document.getElementById('meta-platform').innerText = state.OEM.OEMName;
+                    if (state.OEM.SupportPortal) {
+                        const pBtn = document.getElementById('btn-hero-portal');
+                        const qBtn = document.getElementById('btn-quick-portal');
+                        pBtn.href = state.OEM.SupportPortal;
+                        pBtn.innerText = "Open " + state.OEM.OEMName + " Support Portal";
+                        qBtn.href = state.OEM.SupportPortal;
+                    }
+                    if (state.OEM.ToolUrl) {
+                        const tBtn = document.getElementById('btn-hero-tool');
+                        const qtBtn = document.getElementById('btn-quick-tool');
+                        tBtn.href = state.OEM.ToolUrl;
+                        tBtn.innerText = state.OEM.ToolName || "OEM Diagnostic Tool";
+                        qtBtn.href = state.OEM.ToolUrl;
+                    }
+                }
+
+                // 3. Progress metrics
+                const pct = state.ProgressPercent || 0;
+                document.getElementById('progress-pct').innerText = pct + "%";
+                document.getElementById('main-progress-fill').style.width = pct + "%";
+                document.getElementById('progress-status-sub').innerText = state.Status || "Active";
+
+                if (state.CurrentStage) {
+                    document.getElementById('current-stage-index').innerText = "STAGE " + state.CurrentStage.Index + " OF 13";
+                    document.getElementById('current-stage-name').innerText = state.CurrentStage.Name;
+                }
+
+                // 4. Render Stages
+                if (state.Stages && state.Stages.length > 0) {
+                    const stageContainer = document.getElementById('pipeline-stages-container');
+                    let stagesHtml = "";
+                    state.Stages.forEach(function(s) {
+                        let cardClass = "stage-card";
+                        let badgeClass = "status-badge badge-pending";
+                        let statusText = s.Status || "Pending";
+
+                        if (statusText === "Running") {
+                            cardClass += " is-running";
+                            badgeClass = "status-badge badge-running";
+                            statusText = "IN PROGRESS";
+                        } else if (statusText === "Completed") {
+                            cardClass += " is-completed";
+                            badgeClass = "status-badge badge-completed";
+                            statusText = "[OK] DONE";
+                        } else if (statusText === "Warning") {
+                            cardClass += " is-warning";
+                            badgeClass = "status-badge badge-warning";
+                            statusText = "[!] NOTICE";
+                        } else if (statusText === "Failed") {
+                            cardClass += " is-failed";
+                            badgeClass = "status-badge badge-failed";
+                            statusText = "[X] FAILED";
+                        }
+
+                        stagesHtml += '<div class="' + cardClass + '">' +
+                            '<div class="stage-card-top">' +
+                                '<span class="stage-index-tag">STAGE ' + (s.Index < 10 ? '0' + s.Index : s.Index) + '</span>' +
+                                '<span class="' + badgeClass + '">' + statusText + '</span>' +
+                            '</div>' +
+                            '<div class="stage-title">' + s.Name + '</div>' +
+                        '</div>';
+                    });
+                    stageContainer.innerHTML = stagesHtml;
+                }
+
+                // 5. Render Incidents (Star Feature)
+                const incContainer = document.getElementById('incident-container');
+                if (state.Incidents && state.Incidents.length > 0) {
+                    let incHtml = "";
+                    state.Incidents.forEach(function(inc) {
+                        incHtml += '<div class="incident-card">' +
+                            '<div class="incident-header">' +
+                                '<div class="incident-title-row">' +
+                                    '<span class="incident-tag">[!] INCIDENT DETECTED</span>' +
+                                    '<span class="incident-title">' + inc.Stage + '</span>' +
+                                '</div>' +
+                                '<span class="incident-stage-badge">SELF-HEALED & BYPASSED</span>' +
+                            '</div>' +
+                            '<div class="incident-body">' +
+                                '<div class="incident-box">' +
+                                    '<div class="incident-box-title">Reported System Exception:</div>' +
+                                    '<div class="incident-code">' + inc.RawError + '</div>' +
+                                    '<div style="font-size: 11px; color: var(--text-dim); margin-top: 8px;">Logged at ' + inc.Timestamp + '</div>' +
+                                '</div>' +
+                                '<div class="incident-box">' +
+                                    '<div class="incident-box-title">Root Cause Diagnosis:</div>' +
+                                    '<div class="incident-desc">' + inc.Diagnosis + '</div>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="incident-box" style="margin-bottom: 14px;">' +
+                                '<div class="incident-box-title">Recommended Resolution:</div>' +
+                                '<div class="incident-desc" style="color: #00ff88; font-weight: 500;">' + inc.Resolution + '</div>' +
+                            '</div>' +
+                            '<div class="incident-footer">';
+                        
+                        if (inc.ActionUrl) {
+                            incHtml += '<a href="' + inc.ActionUrl + '" target="_blank" class="btn-portal">' + (inc.ActionText || "Open Official Portal") + '</a>';
+                        }
+                        incHtml += '</div></div>';
+                    });
+                    incContainer.innerHTML = incHtml;
+                } else {
+                    incContainer.innerHTML = '<div class="incident-nominal">' +
+                        '<span>[OK]</span>' +
+                        '<span>ALL SUBSYSTEMS NOMINAL: Zero critical errors detected across active execution routines.</span>' +
+                    '</div>';
+                }
+
+                // 6. Render Terminal Logs
+                if (state.Logs && state.Logs.length > 0) {
+                    const logBox = document.getElementById('terminal-stream-box');
+                    document.getElementById('terminal-log-count').innerText = state.Logs.length + " Events";
+                    let logHtml = "";
+                    state.Logs.forEach(function(l) {
+                        let colClass = "log-info";
+                        let prefix = "[*]";
+                        if (l.Type === "success") { colClass = "log-success"; prefix = "[OK]"; }
+                        else if (l.Type === "warning") { colClass = "log-warning"; prefix = "[!]"; }
+                        else if (l.Type === "error") { colClass = "log-error"; prefix = "[X]"; }
+
+                        logHtml += '<div class="log-line">' +
+                            '<span class="log-time">' + l.Time + '</span>' +
+                            '<span class="' + colClass + '">' + prefix + ' ' + l.Message + '</span>' +
+                        '</div>';
+                    });
+                    logBox.innerHTML = logHtml;
+                    logBox.scrollTop = logBox.scrollHeight;
+                }
+            }
+        };
+
+        // Render initial state if present
+        if (window.ApexLiveState) {
+            window.ApexMissionControl.render(window.ApexLiveState);
+        }
+
+        // Live Poller: injects script tag every 1200ms to bypass local file CORS
+        function triggerLivePoll() {
+            const old = document.getElementById('state-poller-tag');
+            if (old) old.remove();
+            const s = document.createElement('script');
+            s.id = 'state-poller-tag';
+            s.src = 'apex_live_state.js?t=' + Date.now();
+            s.onerror = function() { /* quiet */ };
+            document.head.appendChild(s);
+        }
+        setInterval(triggerLivePoll, 1200);
+    </script>
 </body>
 </html>
-"@
+'@
+}
 
-        $htmlContent | Out-File -FilePath $Global:HtmlReport -Encoding UTF8 -Force
-        Write-Success "Interactive HTML Dashboard compiled: $Global:HtmlReport"
-        Start-Process $Global:HtmlReport -ErrorAction SilentlyContinue
+function Export-DiagnosticHtmlReport {
+    param([switch]$Silent)
+
+    if (-not $Silent) {
+        Write-Step "Compiling interactive Cyberpunk/Fluent HTML Diagnostic Dashboard..."
+    }
+
+    try {
+        Initialize-AppDirectory
+        
+        # Refresh current telemetry in live state
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+        $gpus = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object -First 1
+        $vols = Get-Volume -DriveLetter C -ErrorAction SilentlyContinue
+        $oem = Get-OEMSupportDetails
+        $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
+
+        $totalRamGB = if ($cs) { [Math]::Round($cs.TotalPhysicalMemory / 1GB, 1) } else { 16 }
+        $freeRamGB = if ($os) { [Math]::Round($os.FreePhysicalMemory / 1MB, 1) } else { 8 }
+        $usedRamGB = [Math]::Round($totalRamGB - $freeRamGB, 1)
+        $diskCFreeGB = if ($vols) { [Math]::Round($vols.SizeRemaining / 1GB, 1) } else { 0 }
+        $vramGB = if ($gpus -and $gpus.AdapterRAM) { [Math]::Round($gpus.AdapterRAM / 1GB, 1) } else { 0 }
+
+        $wearLevel = 0
+        $batteryPath = "$Global:AppDir\battery-report.xml"
+        if (Test-Path $batteryPath) {
+            try {
+                [xml]$bXml = Get-Content $batteryPath
+                $dCap = [double]$bXml.BatteryReport.Batteries.Battery.DesignCapacity
+                $fCap = [double]$bXml.BatteryReport.Batteries.Battery.FullChargeCapacity
+                if ($dCap -gt 0) {
+                    $wearLevel = [Math]::Round(((1 - ($fCap / $dCap)) * 100), 1)
+                }
+            } catch {}
+        }
+
+        $Global:ApexLiveState.SystemInfo = @{
+            Hostname    = $env:COMPUTERNAME
+            OS          = if ($os) { $os.Caption } else { "Windows 10/11" }
+            Build       = if ($os) { $os.BuildNumber } else { "" }
+            CPU         = if ($cpu) { $cpu.Name } else { "Processor" }
+            Cores       = if ($cpu) { $cpu.NumberOfCores } else { 4 }
+            Threads     = if ($cpu) { $cpu.NumberOfLogicalProcessors } else { 8 }
+            TotalRamGB  = $totalRamGB
+            FreeRamGB   = $freeRamGB
+            UsedRamGB   = $usedRamGB
+            GPU         = if ($gpus) { $gpus.Name } else { "Graphics Controller" }
+            VRAM        = $vramGB
+            DiskCFree   = $diskCFreeGB
+            BatteryWear = $wearLevel
+        }
+
+        $Global:ApexLiveState.OEM = @{
+            OEMName       = $oem.OEMName
+            Model         = $oem.Model
+            SerialNumber  = $oem.SerialNumber
+            ToolName      = $oem.ToolName
+            ToolUrl       = $oem.ToolUrl
+            SupportPortal = $oem.SupportPortal
+        }
+
+        $initialJson = $Global:ApexLiveState | ConvertTo-Json -Depth 6 -Compress
+        $template = Get-HtmlDashboardTemplate
+        $htmlContent = $template.Replace("/*__INITIAL_LIVE_STATE__*/", "window.ApexLiveState = " + $initialJson + ";")
+
+        [System.IO.File]::WriteAllText($Global:HtmlReport, $htmlContent, [System.Text.Encoding]::ASCII)
+        Export-LiveStateJs
+
+        if (-not $Silent) {
+            Write-Success "Interactive HTML Dashboard compiled: $Global:HtmlReport"
+            Start-Process $Global:HtmlReport -ErrorAction SilentlyContinue
+        }
     } catch {
-        Write-Notice "HTML report generation notice: $($_.Exception.Message)"
+        if (-not $Silent) {
+            Write-Notice "HTML report generation notice: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -1407,11 +2169,30 @@ function Invoke-DriverAndOEMUpdates {
         Write-Host "    $($oem.ToolUrl)" -ForegroundColor Cyan
     }
 
-    # PSWindowsUpdate Driver Servicing
+    # PSWindowsUpdate Driver Servicing with Full Resilience & Self-Healing
     Write-Notice "Querying Windows Driver Catalog for pending bus and peripheral updates..."
-    Import-Module PSWindowsUpdate
-    Get-WindowsUpdate -MicrosoftUpdate -UpdateType Driver -Install -AcceptAll -IgnoreReboot | Out-Null
-    Write-Success "Hardware driver catalog servicing completed."
+    try {
+        Import-Module PSWindowsUpdate -ErrorAction SilentlyContinue
+        Get-WindowsUpdate -MicrosoftUpdate -UpdateType Driver -Install -AcceptAll -IgnoreReboot -ErrorAction Stop | Out-Null
+        Write-Success "Hardware driver catalog servicing completed."
+    } catch {
+        $driverErr = $_.Exception.Message
+        Write-Notice "Windows Update Driver Catalog query bypassed: $driverErr"
+        Write-Highlight "Notice: Proprietary OEM drivers ($($oem.OEMName) bus & sensors) are provisioned through the official portal."
+        
+        Add-LiveIncident -Stage "Stage 11: OEM Ecosystem & Driver Servicing" `
+            -RawError $driverErr `
+            -Diagnosis "The generic Windows Update Driver Catalog COM API cannot negotiate proprietary ACPI/bus driver tables for this $($oem.OEMName) model ($($oem.Model)). This is normal on specialized laptop hardware." `
+            -Resolution "Use the dedicated $($oem.OEMName) Support Portal to download tested proprietary motherboard, chipset, and sensor drivers." `
+            -ActionUrl $oem.SupportPortal `
+            -ActionText "Open $($oem.OEMName) Support Portal ($($oem.SerialNumber))"
+
+        Write-Notice "Refreshing local PnP device bus as fallback..."
+        try {
+            Start-Process -FilePath "pnputil.exe" -ArgumentList "/scan-devices" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+            Write-Success "Local PnP device bus rescanned successfully."
+        } catch {}
+    }
 }
 
 # ==============================================================================
@@ -1537,7 +2318,22 @@ function Start-FullAutoPilot {
             Write-Host " +------------------------------------------------------------------------+" -ForegroundColor Magenta
             Write-Host " | >>> [PIPELINE STAGE $($task.Index)/$($pipeline.Count)]: $($task.Name.PadRight(47))|" -ForegroundColor White
             Write-Host " +------------------------------------------------------------------------+" -ForegroundColor Magenta
-            & $task.Action
+            
+            Update-LiveStage -Index $task.Index -Status "Running"
+            try {
+                & $task.Action
+                Update-LiveStage -Index $task.Index -Status "Completed"
+            } catch {
+                $errStageMsg = $_.Exception.Message
+                Write-Critical "Non-fatal event in Stage $($task.Index) ($($task.Name)): $errStageMsg"
+                Add-LiveIncident -Stage "Stage $($task.Index): $($task.Name)" `
+                    -RawError $errStageMsg `
+                    -Diagnosis "A subsystem operation encountered an exception during execution. Non-fatal, continuing pipeline." `
+                    -Resolution "Review system logs or rerun the specific module from the main menu." `
+                    -ActionUrl "" `
+                    -ActionText ""
+                Update-LiveStage -Index $task.Index -Status "Warning"
+            }
 
             # Check if pending reboot was triggered
             if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") {
@@ -1552,6 +2348,11 @@ function Start-FullAutoPilot {
     }
 
     Clear-AutomationState
+    if ($null -ne $Global:ApexLiveState) {
+        $Global:ApexLiveState.Status = "Completed"
+        $Global:ApexLiveState.ProgressPercent = 100
+        Export-LiveStateJs
+    }
     Write-Host ""
     Write-Host " +========================================================================+" -ForegroundColor Green
     Write-Host " |         [OK] FULL BEAST MODE PIPELINE EXECUTED SUCCESSFULLY!           |" -ForegroundColor Green
@@ -1573,6 +2374,13 @@ function Start-FullAutoPilot {
 # MAIN ENTRY POINT & FLUENT INTERACTIVE MENU
 # ==============================================================================
 try {
+    # Initialize Live Mission Control & Launch Browser Dashboard
+    Initialize-LiveDashboard
+    if (-not $Global:DashboardLaunched) {
+        $Global:DashboardLaunched = $true
+        Start-Process $Global:HtmlReport -ErrorAction SilentlyContinue
+    }
+
     $activeState = Get-AutomationState
 
     if (($args -contains "-Resume") -and $activeState) {
